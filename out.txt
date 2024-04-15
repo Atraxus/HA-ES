@@ -1,0 +1,174 @@
+Fitting GES for task 146818_0, dataset Australian, fold 0
+        ROC AUC Test Score for 146818_0: 0.9609507640067911
+        Final ensemble size: 45
+        Number of different base models in the ensemble: 29
+Fitting QO for task 146818_0, dataset Australian, fold 0
+        ROC AUC Test Score for 146818_0: 0.9609507640067911
+        Final ensemble size: 49
+Fitting ENS_SIZE_QDO for task 146818_0, dataset Australian, fold 0
+        ROC AUC Test Score for 146818_0: 0.9609507640067911
+        Final ensemble size: 49
+Fitting GES for task 146818_1, dataset Australian, fold 1
+        ROC AUC Test Score for 146818_1: 0.9202037351443124
+        Final ensemble size: 44
+        Number of different base models in the ensemble: 30
+Fitting QO for task 146818_1, dataset Australian, fold 1
+        ROC AUC Test Score for 146818_1: 0.9210526315789472
+        Final ensemble size: 49
+Fitting ENS_SIZE_QDO for task 146818_1, dataset Australian, fold 1
+        ROC AUC Test Score for 146818_1: 0.9210526315789472
+        Final ensemble size: 49
+Fitting GES for task 146818_2, dataset Australian, fold 2
+        ROC AUC Test Score for 146818_2: 0.9235993208828523
+        Final ensemble size: 64
+        Number of different base models in the ensemble: 28
+Fitting QO for task 146818_2, dataset Australian, fold 2
+        ROC AUC Test Score for 146818_2: 0.9295415959252971
+        Final ensemble size: 49
+Fitting ENS_SIZE_QDO for task 146818_2, dataset Australian, fold 2
+        ROC AUC Test Score for 146818_2: 0.9295415959252971
+        Final ensemble size: 49
+Fitting GES for task 190412_0, dataset arcene, fold 0
+        ROC AUC Test Score for 190412_0: 0.75
+        Final ensemble size: 20
+        Number of different base models in the ensemble: 17
+Fitting QO for task 190412_0, dataset arcene, fold 0
+        ROC AUC Test Score for 190412_0: 0.75
+        Final ensemble size: 49
+Fitting ENS_SIZE_QDO for task 190412_0, dataset arcene, fold 0
+        ROC AUC Test Score for 190412_0: 0.75
+        Final ensemble size: 49
+Fitting GES for task 190412_1, dataset arcene, fold 1
+        ROC AUC Test Score for 190412_1: 1.0
+        Final ensemble size: 90
+        Number of different base models in the ensemble: 59
+Fitting QO for task 190412_1, dataset arcene, fold 1
+        ROC AUC Test Score for 190412_1: 1.0
+        Final ensemble size: 49
+Fitting ENS_SIZE_QDO for task 190412_1, dataset arcene, fold 1
+        ROC AUC Test Score for 190412_1: 1.0
+        Final ensemble size: 49
+Fitting GES for task 190412_2, dataset arcene, fold 2
+        ROC AUC Test Score for 190412_2: 1.0
+        Final ensemble size: 8
+        Number of different base models in the ensemble: 7
+Fitting QO for task 190412_2, dataset arcene, fold 2
+        ROC AUC Test Score for 190412_2: 1.0
+        Final ensemble size: 49
+Fitting ENS_SIZE_QDO for task 190412_2, dataset arcene, fold 2
+        ROC AUC Test Score for 190412_2: 1.0
+        Final ensemble size: 49
+Fitting GES for task 3812_0, dataset arsenic-female-bladder, fold 0
+        ROC AUC Test Score for 3812_0: 0.8307291666666666
+        Final ensemble size: 41
+        Number of different base models in the ensemble: 26
+Fitting QO for task 3812_0, dataset arsenic-female-bladder, fold 0
+        ROC AUC Test Score for 3812_0: 0.8359375
+        Final ensemble size: 49
+Fitting ENS_SIZE_QDO for task 3812_0, dataset arsenic-female-bladder, fold 0
+        ROC AUC Test Score for 3812_0: 0.8359375
+        Final ensemble size: 49
+Fitting GES for task 3812_1, dataset arsenic-female-bladder, fold 1
+        ROC AUC Test Score for 3812_1: 0.8098958333333334
+        Final ensemble size: 93
+        Number of different base models in the ensemble: 34
+Fitting QO for task 3812_1, dataset arsenic-female-bladder, fold 1
+        ROC AUC Test Score for 3812_1: 0.8229166666666666
+        Final ensemble size: 49
+Fitting ENS_SIZE_QDO for task 3812_1, dataset arsenic-female-bladder, fold 1
+        ROC AUC Test Score for 3812_1: 0.8229166666666666
+        Final ensemble size: 49
+Fitting GES for task 3812_2, dataset arsenic-female-bladder, fold 2
+        ROC AUC Test Score for 3812_2: 0.8359375
+        Final ensemble size: 57
+        Number of different base models in the ensemble: 28
+Fitting QO for task 3812_2, dataset arsenic-female-bladder, fold 2
+        ROC AUC Test Score for 3812_2: 0.8385416666666666
+        Final ensemble size: 49
+Fitting ENS_SIZE_QDO for task 3812_2, dataset arsenic-female-bladder, fold 2
+        ROC AUC Test Score for 3812_2: 0.8385416666666666
+        Final ensemble size: 49
+Fitting GES for task 9905_0, dataset autoUniv-au7-700, fold 0
+        ROC AUC Test Score for 9905_0: 0.6802233630512245
+        Final ensemble size: 95
+        Number of different base models in the ensemble: 20
+Fitting QO for task 9905_0, dataset autoUniv-au7-700, fold 0
+        ROC AUC Test Score for 9905_0: 0.6978274789556954
+        Final ensemble size: 49
+Fitting ENS_SIZE_QDO for task 9905_0, dataset autoUniv-au7-700, fold 0
+        ROC AUC Test Score for 9905_0: 0.6978274789556954
+        Final ensemble size: 49
+Fitting GES for task 9905_1, dataset autoUniv-au7-700, fold 1
+        ROC AUC Test Score for 9905_1: 0.748554384210551
+        Final ensemble size: 100
+        Number of different base models in the ensemble: 19
+Fitting QO for task 9905_1, dataset autoUniv-au7-700, fold 1
+        ROC AUC Test Score for 9905_1: 0.7489105270817782
+        Final ensemble size: 49
+Fitting ENS_SIZE_QDO for task 9905_1, dataset autoUniv-au7-700, fold 1
+        ROC AUC Test Score for 9905_1: 0.7489105270817782
+        Final ensemble size: 49
+Fitting GES for task 9905_2, dataset autoUniv-au7-700, fold 2
+        ROC AUC Test Score for 9905_2: 0.691899395783158
+        Final ensemble size: 98
+        Number of different base models in the ensemble: 23
+Fitting QO for task 9905_2, dataset autoUniv-au7-700, fold 2
+        ROC AUC Test Score for 9905_2: 0.6860097087834444
+        Final ensemble size: 49
+Fitting ENS_SIZE_QDO for task 9905_2, dataset autoUniv-au7-700, fold 2
+        ROC AUC Test Score for 9905_2: 0.6860097087834444
+        Final ensemble size: 49
+Fitting GES for task 11_0, dataset balance-scale, fold 0
+        ROC AUC Test Score for 11_0: 1.0
+        Final ensemble size: 3
+        Number of different base models in the ensemble: 3
+Fitting QO for task 11_0, dataset balance-scale, fold 0
+        ROC AUC Test Score for 11_0: 1.0
+        Final ensemble size: 49
+Fitting ENS_SIZE_QDO for task 11_0, dataset balance-scale, fold 0
+        ROC AUC Test Score for 11_0: 1.0
+        Final ensemble size: 49
+Fitting GES for task 11_1, dataset balance-scale, fold 1
+        ROC AUC Test Score for 11_1: 1.0
+        Final ensemble size: 5
+        Number of different base models in the ensemble: 5
+Fitting QO for task 11_1, dataset balance-scale, fold 1
+        ROC AUC Test Score for 11_1: 1.0
+        Final ensemble size: 49
+Fitting ENS_SIZE_QDO for task 11_1, dataset balance-scale, fold 1
+        ROC AUC Test Score for 11_1: 1.0
+        Final ensemble size: 49
+Fitting GES for task 11_2, dataset balance-scale, fold 2
+        ROC AUC Test Score for 11_2: 1.0
+        Final ensemble size: 2
+        Number of different base models in the ensemble: 2
+Fitting QO for task 11_2, dataset balance-scale, fold 2
+        ROC AUC Test Score for 11_2: 1.0
+        Final ensemble size: 49
+Fitting ENS_SIZE_QDO for task 11_2, dataset balance-scale, fold 2
+        ROC AUC Test Score for 11_2: 1.0
+        Final ensemble size: 49
+Fitting GES for task 359955_0, dataset blood-transfusion-service-center, fold 0
+        ROC AUC Test Score for 359955_0: 0.7490253411306044
+        Final ensemble size: 79
+        Number of different base models in the ensemble: 24
+Fitting QO for task 359955_0, dataset blood-transfusion-service-center, fold 0
+        ROC AUC Test Score for 359955_0: 0.7626705653021443
+        Final ensemble size: 49
+Fitting ENS_SIZE_QDO for task 359955_0, dataset blood-transfusion-service-center, fold 0
+        ROC AUC Test Score for 359955_0: 0.7626705653021443
+        Final ensemble size: 49
+Fitting GES for task 359955_1, dataset blood-transfusion-service-center, fold 1
+        ROC AUC Test Score for 359955_1: 0.8591617933723197
+        Final ensemble size: 61
+        Number of different base models in the ensemble: 25
+Fitting QO for task 359955_1, dataset blood-transfusion-service-center, fold 1
+        ROC AUC Test Score for 359955_1: 0.8591617933723198
+        Final ensemble size: 49
+Fitting ENS_SIZE_QDO for task 359955_1, dataset blood-transfusion-service-center, fold 1
+        ROC AUC Test Score for 359955_1: 0.8591617933723198
+        Final ensemble size: 49
+Fitting GES for task 359955_2, dataset blood-transfusion-service-center, fold 2
+        ROC AUC Test Score for 359955_2: 0.7153996101364523
+        Final ensemble size: 26
+        Number of different base models in the ensemble: 14

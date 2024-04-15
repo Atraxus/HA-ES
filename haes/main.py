@@ -1,11 +1,14 @@
 from tabrepo import load_repository, EvaluationRepository
+
 from phem.methods.ensemble_selection import EnsembleSelection
+from phem.methods.ensemble_selection.qdo.behavior_spaces import get_bs_configspace_similarity_and_loss_correlation, get_bs_ensemble_size_and_loss_correlation
 from phem.application_utils.supported_metrics import msc
 from phem.methods.ensemble_selection.qdo.qdo_es import QDOEnsembleSelection
+
 from sklearn.metrics import roc_auc_score
+from dataclasses import dataclass, field
 
 import numpy as np
-from dataclasses import dataclass
 
 @dataclass
 class FakedFittedAndValidatedClassificationBaseModel:
@@ -30,7 +33,8 @@ class FakedFittedAndValidatedClassificationBaseModel:
     val_probabilities: np.ndarray
     test_probabilities: np.ndarray
     return_val_data: bool = True
-
+    model_metadata: dict = field(default_factory=dict)
+    
     @property
     def probabilities(self):
         if self.return_val_data:
@@ -91,10 +95,11 @@ def evaluate_ensemble(name: str, ensemble: EnsembleSelection, repo: EvaluationRe
     if(name == "GES"):
         print(f"\tFinal ensemble size: {len(ensemble.indices_)}")
         print(f"\tNumber of different base models in the ensemble: {len(set(ensemble.indices_))}")
-    elif(name == "QDO"):
-        print(f"\tFinal ensemble size: {len(ensemble.archive)}")
-        print(f"\tNumber of different base models in the ensemble: {len(set(ensemble.archive))}")
-    else: 
+    elif(type(ensemble) == QDOEnsembleSelection):
+        print(f"\tFinal ensemble size: {len(ensemble.weights_ != 0)}")
+        weight_indices = np.where(ensemble.weights_ != 0)[0]
+        print(f"\tNumber of different base models in the ensemble: {len(set(weight_indices))}")
+    else:
         pass
 
 def main():
@@ -115,8 +120,6 @@ def main():
     ]
 
     # Setup the ensemble evaluation
-    # for each task, evaluate the ensemble of size n
-    ensemble_size = 100
     for task in tasks:
         dataset = repo.task_to_dataset(task)
         fold = repo.task_to_fold(task)
@@ -136,6 +139,7 @@ def main():
                 name=config,
                 val_probabilities=predictions_val[-1],
                 test_probabilities=predictions_test[-1],
+                model_metadata={'config': config} 
             )
 
             base_models.append(model)
@@ -155,20 +159,39 @@ def main():
         # Initialize EnsembleSelection with the selected metric
         ges = EnsembleSelection(
             base_models=base_models,
-            n_iterations=50,
+            n_iterations=100,
             metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
             random_state=1,
         )
-        qdo = QDOEnsembleSelection(
+        evaluate_ensemble("GES", ges, repo, task, predictions_val, predictions_test)
+        qo = QDOEnsembleSelection(
             base_models=base_models,
-            n_iterations=50,
+            n_iterations=3,
             score_metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
             random_state=1,
             archive_type="quality",
         )
-        
-        evaluate_ensemble("GES", ges, repo, task, predictions_val, predictions_test)
-        evaluate_ensemble("QDO", qdo, repo, task, predictions_val, predictions_test)
+        evaluate_ensemble("QO", qo, repo, task, predictions_val, predictions_test)
+        # configspace_similarity_and_loss_correlation = get_bs_configspace_similarity_and_loss_correlation()
+        # qdo = QDOEnsembleSelection(
+        #     base_models=base_models,
+        #     n_iterations=3,
+        #     score_metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
+        #     random_state=1,
+        #     behavior_space=configspace_similarity_and_loss_correlation,
+        #     archive_type="quality",
+        # )
+        # evaluate_ensemble("QDO", qdo, repo, task, predictions_val, predictions_test)
+        ensemble_size_and_loss_correlation = get_bs_ensemble_size_and_loss_correlation()
+        ens_size_qdo = QDOEnsembleSelection(
+            base_models=base_models,
+            n_iterations=3,
+            score_metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
+            random_state=1,
+            behavior_space=ensemble_size_and_loss_correlation,
+            archive_type="quality",
+        )
+        evaluate_ensemble("ENS_SIZE_QDO", ens_size_qdo, repo, task, predictions_val, predictions_test)
 
 
 if __name__ == '__main__':
