@@ -96,9 +96,9 @@ def evaluate_ensemble(name: str, ensemble: EnsembleSelection, repo: EvaluationRe
         print(f"\tFinal ensemble size: {len(ensemble.indices_)}")
         print(f"\tNumber of different base models in the ensemble: {len(set(ensemble.indices_))}")
     elif(type(ensemble) == QDOEnsembleSelection):
-        print(f"\tFinal ensemble size: {len(ensemble.weights_ != 0)}")
         weight_indices = np.where(ensemble.weights_ != 0)[0]
-        print(f"\tNumber of different base models in the ensemble: {len(set(weight_indices))}")
+        print(f"\tFinal ensemble size: {len(weight_indices)}")
+        # print(f"\tNumber of different base models in the ensemble: {len(set(weight_indices))}") # Does not work bc weight_indices is already unique
     else:
         pass
 
@@ -139,7 +139,7 @@ def main():
                 name=config,
                 val_probabilities=predictions_val[-1],
                 test_probabilities=predictions_test[-1],
-                model_metadata={'config': config} 
+                model_metadata={'config': {'923740129374': 1, '091237490123740987': 2}, 'auto-sklearn-model': 12346796}
             )
 
             base_models.append(model)
@@ -166,26 +166,26 @@ def main():
         evaluate_ensemble("GES", ges, repo, task, predictions_val, predictions_test)
         qo = QDOEnsembleSelection(
             base_models=base_models,
-            n_iterations=3,
+            n_iterations=10,
             score_metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
             random_state=1,
             archive_type="quality",
         )
         evaluate_ensemble("QO", qo, repo, task, predictions_val, predictions_test)
-        # configspace_similarity_and_loss_correlation = get_bs_configspace_similarity_and_loss_correlation()
-        # qdo = QDOEnsembleSelection(
-        #     base_models=base_models,
-        #     n_iterations=3,
-        #     score_metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
-        #     random_state=1,
-        #     behavior_space=configspace_similarity_and_loss_correlation,
-        #     archive_type="quality",
-        # )
-        # evaluate_ensemble("QDO", qdo, repo, task, predictions_val, predictions_test)
+        configspace_similarity_and_loss_correlation = get_bs_configspace_similarity_and_loss_correlation()
+        qdo = QDOEnsembleSelection(
+            base_models=base_models,
+            n_iterations=10,
+            score_metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
+            random_state=1,
+            behavior_space=configspace_similarity_and_loss_correlation,
+            archive_type="quality",
+        )
+        evaluate_ensemble("QDO", qdo, repo, task, predictions_val, predictions_test)
         ensemble_size_and_loss_correlation = get_bs_ensemble_size_and_loss_correlation()
         ens_size_qdo = QDOEnsembleSelection(
             base_models=base_models,
-            n_iterations=3,
+            n_iterations=10,
             score_metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
             random_state=1,
             behavior_space=ensemble_size_and_loss_correlation,
