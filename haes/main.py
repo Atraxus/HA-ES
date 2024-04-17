@@ -1,3 +1,4 @@
+from phem.methods.ensemble_selection.qdo.behavior_space import BehaviorSpace
 from tabrepo import load_repository, EvaluationRepository
 
 from phem.methods.ensemble_selection import EnsembleSelection
@@ -62,6 +63,38 @@ def expand_binary_predictions(predictions):
     return expanded_predictions
 
 
+def get_custom_behavior_space_with_inference_time(
+    max_possible_inference_time: float,
+) -> BehaviorSpace:
+    # Using ensemble size (an existing behavior function) and a custom behavior function to create a 2D behavior space.
+    from phem.methods.ensemble_selection.qdo.behavior_functions.basic import LossCorrelationMeasure
+    from phem.methods.ensemble_selection.qdo.behavior_space import BehaviorFunction
+
+    EnsembleInferenceTime = BehaviorFunction(
+        ensemble_inference_time,  # function to call.
+        # define the required arguments for the function `ensemble_inference_time`
+        required_arguments=["input_metadata"],
+        # Define the initial starting range of the behavior space (due to using a sliding boundaries archive, this will be re-mapped anyhow)
+        range_tuple=(0, max_possible_inference_time + 1),  # +1 for safety.
+        # Defines which kind of prediction data is needed as input (if  any)
+        required_prediction_format="none",
+        name="Ensemble Inference Time",
+    )
+
+    return BehaviorSpace([LossCorrelationMeasure, EnsembleInferenceTime])
+
+
+def ensemble_inference_time(input_metadata: list[dict]):
+    """A custom behavior function.
+
+    Some Notes:
+        - The input_metadata here is the metadata for each base model in the ensemble. How this is called is defined in
+            phem.methods.ensemble_selection.qdo.qdo_es.evaluate_single_solution.
+        - The behavior function definition and arguments depends on its definition in the BehaviorFunction class (see below).
+            For all options, see phem.methods.ensemble_selection.qdo.behavior_space.BehaviorFunction.
+    """
+    return sum([md["val_predict_time"] for md in input_metadata])
+
 def evaluate_ensemble(name: str, ensemble: EnsembleSelection, repo: EvaluationRepository, task: str, predictions_val: list[np.ndarray], predictions_test: list[np.ndarray]):
     dataset = repo.task_to_dataset(task)
     fold = repo.task_to_fold(task)
@@ -81,7 +114,7 @@ def evaluate_ensemble(name: str, ensemble: EnsembleSelection, repo: EvaluationRe
         bm.switch_to_val_simulation()
 
     print(f"Fitting {name} for task {task}, dataset {dataset}, fold {fold}")
-    ensemble.fit(predictions_val, y_val)
+    ensemble.ensemble_fit(predictions_val, y_val)
 
     # Simulate to simulating predictions on test data  (i.e., the test data of the ensemble and base models)
     for bm in ensemble.base_models:
@@ -97,10 +130,11 @@ def evaluate_ensemble(name: str, ensemble: EnsembleSelection, repo: EvaluationRe
         print(f"\tNumber of different base models in the ensemble: {len(set(ensemble.indices_))}")
     elif(type(ensemble) == QDOEnsembleSelection):
         weight_indices = np.where(ensemble.weights_ != 0)[0]
-        print(f"\tFinal ensemble size: {len(weight_indices)}")
-        # print(f"\tNumber of different base models in the ensemble: {len(set(weight_indices))}") # Does not work bc weight_indices is already unique
+        print(f"\tNumber of different base models in the ensemble: {len(weight_indices)}")
     else:
         pass
+    
+    
 
 def main():
     # Define the context for the ensemble evaluation
@@ -135,11 +169,23 @@ def main():
 
             # Wrap predictions in the FakedFittedAndValidatedClassificationBaseModel
             # Note: You might need to adjust how predictions are combined or selected
+            metrics = repo.metrics(datasets=[dataset], configs=[config])
+            try:
+                time_infer_s = metrics.loc[(dataset, fold, config), 'time_infer_s']
+                time_train_s = metrics.loc[(dataset, fold, config), 'time_train_s']
+            except KeyError as e:
+                print(f"Error accessing data: {e}")
             model = FakedFittedAndValidatedClassificationBaseModel(
                 name=config,
                 val_probabilities=predictions_val[-1],
                 test_probabilities=predictions_test[-1],
-                model_metadata={'config': {'923740129374': 1, '091237490123740987': 2}, 'auto-sklearn-model': 12346796}
+                model_metadata={
+                    "fit_time": time_train_s,
+                    "test_predict_time": time_infer_s, #!
+                    "val_predict_time": time_infer_s,
+                    'config': {'923740129374': 1, '091237490123740987': 2}, 
+                    'auto-sklearn-model': 12346796,
+                }
             )
 
             base_models.append(model)
@@ -179,9 +225,21 @@ def main():
             score_metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
             random_state=1,
             behavior_space=configspace_similarity_and_loss_correlation,
-            archive_type="quality",
         )
         evaluate_ensemble("QDO", qdo, repo, task, predictions_val, predictions_test)
+        max_possible_ensemble_infer_time = sum(
+            [bm.model_metadata["test_predict_time"] for bm in base_models],
+        )
+        ensemble_size_and_loss_correlation = get_custom_behavior_space_with_inference_time(max_possible_ensemble_infer_time)
+        infer_time_qdo = QDOEnsembleSelection(
+            base_models=base_models,
+            n_iterations=10,
+            score_metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
+            random_state=1,
+            behavior_space=ensemble_size_and_loss_correlation,
+            base_models_metadata_type="custom",     
+        )
+        evaluate_ensemble("INFER_TIME_QDO", infer_time_qdo, repo, task, predictions_val, predictions_test)
         ensemble_size_and_loss_correlation = get_bs_ensemble_size_and_loss_correlation()
         ens_size_qdo = QDOEnsembleSelection(
             base_models=base_models,
@@ -189,7 +247,6 @@ def main():
             score_metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
             random_state=1,
             behavior_space=ensemble_size_and_loss_correlation,
-            archive_type="quality",
         )
         evaluate_ensemble("ENS_SIZE_QDO", ens_size_qdo, repo, task, predictions_val, predictions_test)
 
