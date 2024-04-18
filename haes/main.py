@@ -133,6 +133,14 @@ def evaluate_ensemble(
     print(f"Fitting {name} for task {task}, dataset {dataset}, fold {fold}")
     ensemble.ensemble_fit(predictions_val, y_val)
 
+    # Output the ROC AUC score on the validation data
+    y_pred = ensemble.ensemble_predict_proba(predictions_val)
+    if number_of_classes == 2:
+        y_pred = y_pred[:, 1]
+    print(
+        f"\tROC AUC Validation Score for {task}: {roc_auc_score(y_val, y_pred, multi_class='ovr', average='macro')}"
+    )
+
     # Simulate to simulating predictions on test data  (i.e., the test data of the ensemble and base models)
     for bm in ensemble.base_models:
         bm.switch_to_test_simulation()
@@ -148,11 +156,15 @@ def evaluate_ensemble(
         print(
             f"\tNumber of different base models in the ensemble: {len(set(ensemble.indices_))}"
         )
+        models_used = [ensemble.base_models[i].name for i in set(ensemble.indices_)]
+        print(f"\tModels used: {models_used}")
     elif type(ensemble) == QDOEnsembleSelection:
         weight_indices = np.where(ensemble.weights_ != 0)[0]
         print(
             f"\tNumber of different base models in the ensemble: {len(weight_indices)}"
         )
+        models_used = [ensemble.base_models[i].name for i in weight_indices]
+        print(f"\tModels used: {models_used}")
     else:
         pass
 
@@ -191,7 +203,7 @@ def load_and_process_base_models(repo, task, configs, all_config_hyperparameters
             time_train_s = metrics.loc[(dataset, fold, config), "time_train_s"]
         except KeyError as e:
             #! Not all configs have entries; is it ok to assume previous value is good enough?
-            print(f"Error accessing data: {e}") 
+            print(f"Error accessing data: {e}")
 
         config_key = config.rsplit("_BAG_L1", 1)[
             0
@@ -225,7 +237,7 @@ def load_and_process_base_models(repo, task, configs, all_config_hyperparameters
             model_metadata={
                 "fit_time": time_train_s,
                 "test_predict_time": time_infer_s,
-                "val_predict_time": time_infer_s, #!
+                "val_predict_time": time_infer_s,  #!
                 "config": config_dict,
                 "auto-sklearn-model": "PLACEHOLDER",  #! What to pick here as equivalent? Is it even used later on?
             },
@@ -236,7 +248,60 @@ def load_and_process_base_models(repo, task, configs, all_config_hyperparameters
     return base_models, predictions_val, predictions_test
 
 
-def main():
+def evaluate_single_best_model(
+    ensemble: list[FakedFittedAndValidatedClassificationBaseModel],
+    repo: EvaluationRepository,
+    task: str,
+):
+    dataset = repo.task_to_dataset(task)
+    fold = repo.task_to_fold(task)
+    y_val = repo.labels_val(dataset=dataset, fold=fold)
+    y_test = repo.labels_test(dataset=dataset, fold=fold)
+
+    # Determine which model performs best on the validation data
+    best_score = 0
+    best_model = None
+    for model in ensemble:
+        model.switch_to_val_simulation()  # Ensure the model returns validation predictions
+        predicted_probs = model.predict_proba(
+            None
+        )  # Since predictions are pre-stored, no need to pass X
+        score = roc_auc_score(
+            y_val, predicted_probs, multi_class="ovr", average="macro"
+        )
+        if score > best_score:
+            best_score = score
+            best_model = model
+
+    # Now evaluate the best model on test data
+    best_model.switch_to_test_simulation()  # Switch to test predictions
+    predicted_probs_test = best_model.predict_proba(
+        None
+    )  # No X needed as predictions are pre-stored
+    test_score = roc_auc_score(
+        y_test, predicted_probs_test, multi_class="ovr", average="macro"
+    )
+    print(f"Best Model {best_model.name} ROC AUC Test Score for {task}: {test_score}")
+
+    # Also on validation data
+    best_model.switch_to_val_simulation()
+    predicted_probs_val = best_model.predict_proba(None)
+    val_score = roc_auc_score(
+        y_val, predicted_probs_val, multi_class="ovr", average="macro"
+    )
+    print(
+        f"Best Model {best_model.name} ROC AUC Validation Score for {task}: {val_score}"
+    )
+
+
+def main(
+    run_singleBest: bool,
+    run_ges: bool,
+    run_qo: bool,
+    run_qdo: bool,
+    run_infer_time_qdo: bool,
+    run_ens_size_qdo: bool,
+):
     # Define the context for the ensemble evaluation
     context_name = "D244_F3_C1530_30"
     # Load the repository with the specified context
@@ -267,78 +332,99 @@ def main():
         else:
             raise ValueError(f"Unknown task type: {task_type}")
 
+        # Single best model evaluation
+        if run_singleBest:
+            evaluate_single_best_model(base_models, repo, task)
+
         # GES evaluation
-        ges = EnsembleSelection(
-            base_models=base_models,
-            n_iterations=100,
-            metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
-            random_state=1,
-        )
-        evaluate_ensemble("GES", ges, repo, task, predictions_val, predictions_test)
+        if run_ges:
+            ges = EnsembleSelection(
+                base_models=base_models,
+                n_iterations=100,
+                metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
+                random_state=1,
+            )
+            evaluate_ensemble("GES", ges, repo, task, predictions_val, predictions_test)
 
         # QO evaluation
-        qo = QDOEnsembleSelection(
-            base_models=base_models,
-            n_iterations=3,
-            score_metric=msc(
-                metric_name=metric_name, is_binary=is_binary, labels=labels
-            ),
-            random_state=1,
-            archive_type="quality",
-        )
-        evaluate_ensemble("QO", qo, repo, task, predictions_val, predictions_test)
+        if run_qo:
+            qo = QDOEnsembleSelection(
+                base_models=base_models,
+                n_iterations=3,
+                score_metric=msc(
+                    metric_name=metric_name, is_binary=is_binary, labels=labels
+                ),
+                random_state=1,
+                archive_type="quality",
+            )
+            evaluate_ensemble("QO", qo, repo, task, predictions_val, predictions_test)
 
         # QDO evaluation
-        qdo = QDOEnsembleSelection(
-            base_models=base_models,
-            n_iterations=3,
-            score_metric=msc(
-                metric_name=metric_name, is_binary=is_binary, labels=labels
-            ),
-            random_state=1,
-            behavior_space=get_bs_configspace_similarity_and_loss_correlation(),
-        )
-        evaluate_ensemble("QDO", qdo, repo, task, predictions_val, predictions_test)
+        if run_qdo:
+            qdo = QDOEnsembleSelection(
+                base_models=base_models,
+                n_iterations=3,
+                score_metric=msc(
+                    metric_name=metric_name, is_binary=is_binary, labels=labels
+                ),
+                random_state=1,
+                behavior_space=get_bs_configspace_similarity_and_loss_correlation(),
+            )
+            evaluate_ensemble("QDO", qdo, repo, task, predictions_val, predictions_test)
 
         # QDO evaluation with inference time and loss correlation
-        max_possible_ensemble_infer_time = sum(
-            [bm.model_metadata["test_predict_time"] for bm in base_models],
-        )
-        infer_time_qdo = QDOEnsembleSelection(
-            base_models=base_models,
-            n_iterations=3,
-            score_metric=msc(
-                metric_name=metric_name, is_binary=is_binary, labels=labels
-            ),
-            random_state=1,
-            behavior_space=get_custom_behavior_space_with_inference_time(
-                max_possible_ensemble_infer_time
-            ),
-            base_models_metadata_type="custom",
-        )
-        evaluate_ensemble(
-            "INFER_TIME_QDO",
-            infer_time_qdo,
-            repo,
-            task,
-            predictions_val,
-            predictions_test,
-        )
+        if run_infer_time_qdo:
+            max_possible_ensemble_infer_time = sum(
+                [bm.model_metadata["test_predict_time"] for bm in base_models],
+            )
+            infer_time_qdo = QDOEnsembleSelection(
+                base_models=base_models,
+                n_iterations=3,
+                score_metric=msc(
+                    metric_name=metric_name, is_binary=is_binary, labels=labels
+                ),
+                random_state=1,
+                behavior_space=get_custom_behavior_space_with_inference_time(
+                    max_possible_ensemble_infer_time
+                ),
+                base_models_metadata_type="custom",
+            )
+            evaluate_ensemble(
+                "INFER_TIME_QDO",
+                infer_time_qdo,
+                repo,
+                task,
+                predictions_val,
+                predictions_test,
+            )
 
         # QDO evaluation with ensemble size and loss correlation
-        ens_size_qdo = QDOEnsembleSelection(
-            base_models=base_models,
-            n_iterations=3,
-            score_metric=msc(
-                metric_name=metric_name, is_binary=is_binary, labels=labels
-            ),
-            random_state=1,
-            behavior_space=get_bs_ensemble_size_and_loss_correlation(),
-        )
-        evaluate_ensemble(
-            "ENS_SIZE_QDO", ens_size_qdo, repo, task, predictions_val, predictions_test
-        )
+        if run_ens_size_qdo:
+            ens_size_qdo = QDOEnsembleSelection(
+                base_models=base_models,
+                n_iterations=3,
+                score_metric=msc(
+                    metric_name=metric_name, is_binary=is_binary, labels=labels
+                ),
+                random_state=1,
+                behavior_space=get_bs_ensemble_size_and_loss_correlation(),
+            )
+            evaluate_ensemble(
+                "ENS_SIZE_QDO",
+                ens_size_qdo,
+                repo,
+                task,
+                predictions_val,
+                predictions_test,
+            )
 
 
 if __name__ == "__main__":
-    main()
+    main(
+        run_singleBest=True,
+        run_ges=False,
+        run_qo=False,
+        run_qdo=False,
+        run_infer_time_qdo=False,
+        run_ens_size_qdo=False,
+    )
