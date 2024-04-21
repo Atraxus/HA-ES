@@ -2,18 +2,9 @@ import re
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import numpy as np
 
-# from tabrepo import load_repository, EvaluationRepository
-
-
-def get_inference_time(tasks: list) -> dict:
-    # Define the context for the ensemble evaluation
-    # context_name = "D244_F3_C1530_30"
-    # Load the repository with the specified context
-    # repo: EvaluationRepository = load_repository(context_name, cache=True)
-
-    #! I need the configs each ensemble uses here so I can approximate the inference time
-    pass
+from tabrepo import load_repository, EvaluationRepository
 
 
 def parse_data(filepath: str) -> tuple[dict, int, int]:
@@ -31,19 +22,24 @@ def parse_data(filepath: str) -> tuple[dict, int, int]:
     n_tasks = data.count("Fitting ENS_SIZE_QDO")
 
     ensemble_data = []
-    data_pattern = re.compile(
-        r"Fitting (\w+) for task (\d+_\d+), dataset \b[\w-]+\b, fold \d+\n"
-        r"\s*ROC AUC Test Score for \d+_\d+: ([\d\.]+)\n"
-        r"\s*Number of different base models in the ensemble: (\d+)"
+    pattern = (
+        r"Fitting (\w+) for task (\d+_\d+), dataset \b[\w-]+\b, fold \d+\s+"
+        r"ROC AUC Validation Score for \d+_\d+: [\d\.]+\s+"
+        r"ROC AUC Test Score for \d+_\d+: ([\d\.]+)\s+"
+        r"Number of different base models in the ensemble: (\d+)\s+"
+        r"Models used: \[([^\]]+)\]"
     )
+    data_pattern = re.compile(pattern, re.DOTALL)
     matches = data_pattern.findall(data)
     for match in matches:
+        models_used = match[4].replace("'", "").replace('"', "").strip().split(", ")
         ensemble_data.append(
             {
                 "method": match[0],
                 "task": match[1],
                 "roc_auc": float(match[2]),
                 "n_base_models": int(match[3]),
+                "models_used": models_used,
             }
         )
 
@@ -54,18 +50,19 @@ def parse_data(filepath: str) -> tuple[dict, int, int]:
 
 
 def parse_single_best() -> dict:
-    with open("single_best_out.txt", "r") as f:
+    with open("data/single_best_out2.txt", "r") as f:
         data = f.read()
 
     # Example: Best Model RandomForest_r114_BAG_L1 ROC AUC Test Score for 3616_2: 0.6602564102564102
     data_pattern = re.compile(
-        r"Best Model (\w+) ROC AUC Test Score for (\d+_\d+): ([\d\.]+)"
+        r"Best Model (\w+) ROC AUC Test Score for (\d+_\d+): ([\d\.]+)\n"
+        r"Best Model \w+ ROC AUC Validation Score for \d+_\d+: ([\d\.]+)"
     )
     matches = data_pattern.findall(data)
 
     single_best = {}
     for match in matches:
-        single_best[match[1]] = (match[0], float(match[2]))
+        single_best[match[1]] = (match[0], float(match[2]), float(match[3]))
 
     return single_best
 
@@ -167,8 +164,32 @@ def normalize_per_task(df_merged: pd.DataFrame):
     return df_merged
 
 
+def get_inference_time(entry, repo: EvaluationRepository) -> pd.DataFrame:
+    # Get the inference time for each task and method
+    # The inference time of the ensemble is made up of the inference time of the unique base models
+    models_used = entry["models_used"]
+    fold = int(entry["task"].split("_")[1])
+
+    dataset = repo.task_to_dataset(entry["task"])
+    metrics = repo.metrics(datasets=[dataset], configs=models_used)
+
+    metrics_fold = metrics.xs(fold, level="fold")
+    total_inference_time = sum(metrics_fold["time_infer_s"])
+    return total_inference_time
+
+
+def is_pareto_efficient(costs, return_mask=True):
+    is_efficient = np.ones(costs.shape[0], dtype=bool)
+    for i, c in enumerate(costs):
+        # None of the other points should have both lower inference time and higher ROC AUC.
+        is_efficient[i] = np.all(np.any(costs[:i] >= c, axis=1)) and np.all(
+            np.any(costs[i + 1 :] >= c, axis=1)
+        )
+    return is_efficient if return_mask else costs[is_efficient]
+
+
 def main():
-    data, n_errors, n_tasks = parse_data("20240417_1704_out.txt")
+    data, n_errors, n_tasks = parse_data("20240419_0917_out.txt")
     n_configs = 1530
     print(f"Error count: {n_errors}, error rate: {n_errors/(n_tasks*n_configs):.5f}")
 
@@ -178,12 +199,14 @@ def main():
 
     # Prepare single best model data for merging
     single_best_data = []
-    for task, (model, score) in single_best.items():
+    for task, (model, test_score, val_score) in single_best.items():
         single_best_data.append(
             {
                 "method": "Single Best",
                 "task": task,
-                "roc_auc": score,
+                "roc_auc": test_score,
+                "roc_auc_val": val_score,
+                "models_used": [model],
                 "n_base_models": 1,
             }
         )
@@ -199,8 +222,35 @@ def main():
     df = normalized_improvement(df)
     df = create_ranking_for_dataset(df)
 
+    # Load data from tabrepo
+    context_name = "D244_F3_C1530_30"
+    repo: EvaluationRepository = load_repository(context_name, cache=True)
+    df["inference_time"] = df.apply(get_inference_time, axis=1, args=(repo,))
+
     # Remove task_id 3616
     df = df[df["task_id"] != "3616"]
+
+    # Pareto efficiency
+    costs = np.stack((df["inference_time"], -df["roc_auc"]), axis=1)
+    pareto_mask = is_pareto_efficient(costs)
+    pareto_df = df[pareto_mask]
+    plt.figure(figsize=(10, 6))
+    plt.scatter(
+        df["inference_time"], df["roc_auc"], color="gray", label="All Configurations"
+    )
+    plt.scatter(
+        pareto_df["inference_time"],
+        pareto_df["roc_auc"],
+        color="red",
+        label="Pareto Front",
+    )
+    plt.title("Pareto Front of Inference Time vs ROC AUC")
+    plt.xlabel("Inference Time (s)")
+    plt.ylabel("ROC AUC")
+    plt.xscale("log")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig("pareto_front.png", dpi=300)
 
     df_merged = (
         df.groupby(["task_id", "method"])
