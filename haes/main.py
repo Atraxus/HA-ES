@@ -16,6 +16,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 from ribs.visualize import sliding_boundaries_archive_heatmap
 
+import argparse
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run ensemble evaluations with a specific seed."
+    )
+    parser.add_argument(
+        "--seed", type=int, default=0, help="Seed for RNG initialization."
+    )
+    return parser.parse_args()
+
 
 @dataclass
 class FakedFittedAndValidatedClassificationBaseModel:
@@ -140,7 +152,7 @@ def plot_archive(qdo_es: QDOEnsembleSelection, name: str):
         min(y_boundary) * 0.95 - 0.0005,
         max(y_boundary) * 1.05,
     )
-    
+
     plt.savefig(f"archive_plots/{name}.png", dpi=300)
 
 
@@ -206,7 +218,7 @@ def evaluate_ensemble(
         )
         models_used = [ensemble.base_models[i].name for i in weight_indices]
         print(f"\tModels used: {models_used}")
-        
+
         # plot_archive(ensemble, name + f"_{task}")
     else:
         pass
@@ -338,12 +350,13 @@ def evaluate_single_best_model(
 
 
 def main(
-    run_singleBest: bool,
-    run_ges: bool,
-    run_qo: bool,
-    run_qdo: bool,
-    run_infer_time_qdo: bool,
-    run_ens_size_qdo: bool,
+    random_seed: int = 1,
+    run_singleBest: bool = False,
+    run_ges: bool = False,
+    run_qo: bool = False,
+    run_qdo: bool = False,
+    run_infer_time_qdo: bool = False,
+    run_ens_size_qdo: bool = False,
 ):
     # Define the context for the ensemble evaluation
     context_name = "D244_F3_C1530_30"
@@ -463,7 +476,9 @@ def main(
 
 
 if __name__ == "__main__":
+    args = parse_args()
     main(
+        args.seed,
         run_singleBest=False,
         run_ges=True,
         run_qo=True,
