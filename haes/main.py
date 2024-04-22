@@ -398,7 +398,7 @@ def main(
                 base_models=base_models,
                 n_iterations=100,
                 metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
-                random_state=1,
+                random_state=random_seed,
             )
             evaluate_ensemble("GES", ges, repo, task, predictions_val, predictions_test)
 
@@ -410,7 +410,7 @@ def main(
                 score_metric=msc(
                     metric_name=metric_name, is_binary=is_binary, labels=labels
                 ),
-                random_state=1,
+                random_state=random_seed,
                 archive_type="quality",
             )
             evaluate_ensemble("QO", qo, repo, task, predictions_val, predictions_test)
@@ -423,7 +423,7 @@ def main(
                 score_metric=msc(
                     metric_name=metric_name, is_binary=is_binary, labels=labels
                 ),
-                random_state=1,
+                random_state=random_seed,
                 behavior_space=get_bs_configspace_similarity_and_loss_correlation(),
             )
             evaluate_ensemble("QDO", qdo, repo, task, predictions_val, predictions_test)
@@ -439,7 +439,7 @@ def main(
                 score_metric=msc(
                     metric_name=metric_name, is_binary=is_binary, labels=labels
                 ),
-                random_state=1,
+                random_state=random_seed,
                 behavior_space=get_custom_behavior_space_with_inference_time(
                     max_possible_ensemble_infer_time
                 ),
@@ -462,7 +462,7 @@ def main(
                 score_metric=msc(
                     metric_name=metric_name, is_binary=is_binary, labels=labels
                 ),
-                random_state=1,
+                random_state=random_seed,
                 behavior_space=get_bs_ensemble_size_and_loss_correlation(),
             )
             evaluate_ensemble(
