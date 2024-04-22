@@ -3,6 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
+import pygmo as pg
 
 from tabrepo import load_repository, EvaluationRepository
 
@@ -82,7 +83,7 @@ def boxplot(df: pd.DataFrame, y_str: str):
     plt.tight_layout()
 
     # save to file
-    plt.savefig("performance_" + y_str + ".png", dpi=300)
+    plt.savefig("plots/performance_" + y_str + ".png", dpi=300)
 
 
 def boxplot_ranking(df: pd.DataFrame):
@@ -105,7 +106,7 @@ def boxplot_ranking(df: pd.DataFrame):
     plt.tight_layout()
 
     # save to file
-    plt.savefig("performance_" + "dataset_rank" + ".png", dpi=300)
+    plt.savefig("plots/performance_" + "dataset_rank" + ".png", dpi=300)
 
 
 def normalized_improvement(df: pd.DataFrame):
@@ -187,6 +188,36 @@ def is_pareto_efficient(costs, return_mask=True):
         )
     return is_efficient if return_mask else costs[is_efficient]
 
+def plot_pareto_front(df, method_name, color_dict):
+    # Filter the DataFrame for the specific method
+    df_method = df[df["method"] == method_name]
+    costs = np.stack((df_method["inference_time"], -df_method["roc_auc"]), axis=1)
+    pareto_mask = is_pareto_efficient(costs)
+    pareto_df = df_method[pareto_mask]
+
+    # Plotting
+    plt.figure(figsize=(10, 6))
+    plt.scatter(df_method["inference_time"], df_method["roc_auc"], 
+                color=color_dict[method_name], label="All Configurations")
+    plt.scatter(pareto_df["inference_time"], pareto_df["roc_auc"], 
+                color='red', edgecolors='k', label='Pareto Front', zorder=10)
+    plt.title(f"Pareto Front of Inference Time vs ROC AUC for {method_name}")
+    plt.xlabel("Inference Time (s)")
+    plt.xscale("log")
+    plt.ylabel("ROC AUC")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(f"plots/pareto_front_{method_name}.png", dpi=300)
+    
+    # Compute hypervolume
+    pareto_points = np.stack((pareto_df['inference_time'], -pareto_df['roc_auc']), axis=1)
+    ref_point = np.max(pareto_points, axis=0) + 1
+    
+    hv = pg.hypervolume(pareto_points)
+    hypervolume = hv.compute(ref_point)
+
+    print(f"The hypervolume is: {hypervolume}")
 
 def main():
     data, n_errors, n_tasks = parse_data("20240419_0917_out.txt")
@@ -230,6 +261,19 @@ def main():
     # Remove task_id 3616
     df = df[df["task_id"] != "3616"]
 
+    # Pareto efficiency
+    # Exclude single best
+    df = df[df["method"] != "Single Best"]
+
+   # Get the pastel color palette with as many colors as there are methods
+    methods = df['method'].unique()
+    palette = sns.color_palette("pastel", len(methods))
+    color_dict = dict(zip(methods, palette))
+
+    # Iterate through each method and plot the Pareto front
+    for method_name in methods:
+        plot_pareto_front(df, method_name, color_dict)
+
     df_merged = (
         df.groupby(["task_id", "method"])
         .agg(
@@ -243,8 +287,6 @@ def main():
     )
     df_merged = normalize_per_task(df_merged)
 
-    print(df_merged.head(12))
-
     boxplot(df_merged, "roc_auc_normalized")
     boxplot(df, "normalized_improvement")
     df_merged_infertime_no_outliers = df_merged[
@@ -252,42 +294,6 @@ def main():
     ]
     boxplot(df_merged_infertime_no_outliers, "inference_time")
     boxplot_ranking(df_merged)
-
-    # Pareto efficiency
-    # Exclude single best
-    df = df[df["method"] != "Single Best"]
-    costs = np.stack((df["inference_time"], -df["roc_auc"]), axis=1)
-    pareto_mask = is_pareto_efficient(costs)
-    pareto_df = df[pareto_mask]
-
-    # Get the pastel color palette with as many colors as there are methods
-    methods = df['method'].unique()
-    palette = sns.color_palette("pastel", len(methods))
-
-    # Create a color dictionary to map each method to a color
-    color_dict = dict(zip(methods, palette))
-
-    # Plot all configurations with colors based on the method
-    plt.figure(figsize=(10, 6))
-    for method in methods:
-        subset = df[df['method'] == method]
-        plt.scatter(subset['inference_time'], subset['roc_auc'], color=color_dict[method], label=method)
-
-    # Now plot the Pareto front with a distinct color and label
-    plt.scatter(
-        pareto_df['inference_time'], pareto_df['roc_auc'],
-        color='black', edgecolors='k', label='Pareto Front', zorder=10
-    )
-
-    # Enhance plot aesthetics and usability
-    plt.title("Pareto Front of Inference Time vs ROC AUC")
-    plt.xlabel("Inference Time (s)")
-    plt.xscale("log")
-    plt.ylabel("ROC AUC")
-    plt.legend(title='Method', bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.grid(True)
-    plt.tight_layout()  # Adjust layout to accommodate the legend
-    plt.savefig("pareto_front.png", dpi=300)
 
 
 if __name__ == "__main__":
