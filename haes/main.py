@@ -12,6 +12,7 @@ from phem.methods.ensemble_selection.qdo.qdo_es import QDOEnsembleSelection
 from sklearn.metrics import roc_auc_score
 from dataclasses import dataclass, field
 
+import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -165,6 +166,7 @@ def evaluate_ensemble(
     task: str,
     predictions_val: list[np.ndarray],
     predictions_test: list[np.ndarray],
+    seed: int = 1,
 ):
     dataset = repo.task_to_dataset(task)
     fold = repo.task_to_fold(task)
@@ -173,11 +175,13 @@ def evaluate_ensemble(
     predictions_val = np.array(predictions_val)
     predictions_test = np.array(predictions_test)
 
-    number_of_classes = int(repo.dataset_metadata(dataset=dataset)["NumberOfClasses"])  # 0 for regression
+    number_of_classes = int(
+        repo.dataset_metadata(dataset=dataset)["NumberOfClasses"]
+    )  # 0 for regression
     if number_of_classes == 2:
         predictions_val = expand_binary_predictions(predictions_val)
         predictions_test = expand_binary_predictions(predictions_test)
-    
+
     for bm in ensemble.base_models:
         bm.switch_to_val_simulation()
 
@@ -192,14 +196,20 @@ def evaluate_ensemble(
             y_pred_test = y_pred_test[:, 1]
 
         y_test = repo.labels_test(dataset=dataset, fold=fold)
-        roc_auc_val = roc_auc_score(y_val, y_pred_val, multi_class="ovr", average="macro")
-        roc_auc_test = roc_auc_score(y_test, y_pred_test, multi_class="ovr", average="macro")
+        roc_auc_val = roc_auc_score(
+            y_val, y_pred_val, multi_class="ovr", average="macro"
+        )
+        roc_auc_test = roc_auc_score(
+            y_test, y_pred_test, multi_class="ovr", average="macro"
+        )
 
         perf_dict = {
             "name": name,
             "roc_auc_val": roc_auc_val,
             "roc_auc_test": roc_auc_test,
-            "models_used": [ensemble.base_models[i].name for i in set(ensemble.indices_)],
+            "models_used": [
+                ensemble.base_models[i].name for i in set(ensemble.indices_)
+            ],
             "weights": [ensemble.weights_[i] for i in set(ensemble.indices_)],
         }
         performances.append(perf_dict)
@@ -218,8 +228,12 @@ def evaluate_ensemble(
                 y_pred_test = y_pred_test[:, 1]
 
             y_test = repo.labels_test(dataset=dataset, fold=fold)
-            roc_auc_val = roc_auc_score(y_val, y_pred_val, multi_class="ovr", average="macro")
-            roc_auc_test = roc_auc_score(y_test, y_pred_test, multi_class="ovr", average="macro")
+            roc_auc_val = roc_auc_score(
+                y_val, y_pred_val, multi_class="ovr", average="macro"
+            )
+            roc_auc_test = roc_auc_score(
+                y_test, y_pred_test, multi_class="ovr", average="macro"
+            )
 
             weight_indices = np.where(ensemble.weights_ != 0)[0]
             perf_dict = {
@@ -240,7 +254,9 @@ def evaluate_ensemble(
     performance_df["dataset"] = dataset
     performance_df["fold"] = fold
     performance_df["method"] = name
-    performance_df.to_json(f"results/{name}_{task}.json")
+    if not os.path.exists(f"results/seed_{seed}"):
+        os.makedirs(f"results/seed_{seed}")
+    performance_df.to_json(f"results/seed_{seed}/{name}_{task}.json")
 
 
 def load_data(repo, context_name) -> tuple[list[str], list[str], list[int], dict]:
@@ -389,7 +405,10 @@ def main(
     # Evaluate ensemble selection methods for each task
     current_time = time.time()
     for i, task in enumerate(tasks):
-        print(f"Task {i+1}/{len(tasks)}: {task}, elapsed time: {time.time() - current_time:.2f} s")
+        print(
+            f"Task {i+1}/{len(tasks)}: {task}, time for last task: {time.time() - current_time:.2f} s"
+        )
+        current_time = time.time()
         base_models, predictions_val, predictions_test = load_and_process_base_models(
             repo, task, configs, all_config_hyperparameters
         )
@@ -421,7 +440,15 @@ def main(
                 metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
                 random_state=random_seed,
             )
-            evaluate_ensemble("GES", ges, repo, task, predictions_val, predictions_test)
+            evaluate_ensemble(
+                "GES",
+                ges,
+                repo,
+                task,
+                predictions_val,
+                predictions_test,
+                seed=random_seed,
+            )
 
         # QO evaluation
         if run_qo:
@@ -434,7 +461,15 @@ def main(
                 random_state=random_seed,
                 archive_type="quality",
             )
-            evaluate_ensemble("QO", qo, repo, task, predictions_val, predictions_test)
+            evaluate_ensemble(
+                "QO",
+                qo,
+                repo,
+                task,
+                predictions_val,
+                predictions_test,
+                seed=random_seed,
+            )
 
         # QDO evaluation
         if run_qdo:
@@ -447,7 +482,15 @@ def main(
                 random_state=random_seed,
                 behavior_space=get_bs_configspace_similarity_and_loss_correlation(),
             )
-            evaluate_ensemble("QDO", qdo, repo, task, predictions_val, predictions_test)
+            evaluate_ensemble(
+                "QDO",
+                qdo,
+                repo,
+                task,
+                predictions_val,
+                predictions_test,
+                seed=random_seed,
+            )
 
         # QDO evaluation with inference time and loss correlation
         if run_infer_time_qdo:
@@ -466,7 +509,15 @@ def main(
                 ),
                 base_models_metadata_type="custom",
             )
-            evaluate_ensemble("INFER_TIME_QDO", infer_time_qdo, repo, task, predictions_val, predictions_test)
+            evaluate_ensemble(
+                "INFER_TIME_QDO",
+                infer_time_qdo,
+                repo,
+                task,
+                predictions_val,
+                predictions_test,
+                seed=random_seed,
+            )
 
         # QDO evaluation with ensemble size and loss correlation
         if run_ens_size_qdo:
@@ -479,8 +530,15 @@ def main(
                 random_state=random_seed,
                 behavior_space=get_bs_ensemble_size_and_loss_correlation(),
             )
-            evaluate_ensemble("ENS_SIZE_QDO", ens_size_qdo, repo, task, predictions_val, predictions_test)
-
+            evaluate_ensemble(
+                "ENS_SIZE_QDO",
+                ens_size_qdo,
+                repo,
+                task,
+                predictions_val,
+                predictions_test,
+                seed=random_seed,
+            )
 
 
 if __name__ == "__main__":
