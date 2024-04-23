@@ -217,7 +217,7 @@ def plot_pareto_front(df, method_name, color_dict):
     hv = pg.hypervolume(pareto_points)
     hypervolume = hv.compute(ref_point)
 
-    print(f"The hypervolume is: {hypervolume}")
+    print(f"The hypervolume for {method_name} is: {hypervolume}")
 
 def main():
     data, n_errors, n_tasks = parse_data("20240419_0917_out.txt")

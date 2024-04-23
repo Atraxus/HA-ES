@@ -13,9 +13,11 @@ from sklearn.metrics import roc_auc_score
 from dataclasses import dataclass, field
 
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from ribs.visualize import sliding_boundaries_archive_heatmap
 
+import time
 import argparse
 
 
@@ -168,60 +170,77 @@ def evaluate_ensemble(
     fold = repo.task_to_fold(task)
 
     y_val = repo.labels_val(dataset=dataset, fold=fold)
-    # Format (n_configs, n_samples, n_classes)
     predictions_val = np.array(predictions_val)
     predictions_test = np.array(predictions_test)
 
-    number_of_classes = int(
-        repo.dataset_metadata(dataset=dataset)["NumberOfClasses"]
-    )  # 0 for regression
+    number_of_classes = int(repo.dataset_metadata(dataset=dataset)["NumberOfClasses"])  # 0 for regression
     if number_of_classes == 2:
         predictions_val = expand_binary_predictions(predictions_val)
         predictions_test = expand_binary_predictions(predictions_test)
-
-    # Switch to simulating predictions on validation data  (i.e., the training data of the ensemble)
+    
     for bm in ensemble.base_models:
         bm.switch_to_val_simulation()
 
-    print(f"Fitting {name} for task {task}, dataset {dataset}, fold {fold}")
     ensemble.ensemble_fit(predictions_val, y_val)
 
-    # Output the ROC AUC score on the validation data
-    y_pred = ensemble.ensemble_predict_proba(predictions_val)
-    if number_of_classes == 2:
-        y_pred = y_pred[:, 1]
-    print(
-        f"\tROC AUC Validation Score for {task}: {roc_auc_score(y_val, y_pred, multi_class='ovr', average='macro')}"
-    )
-
-    # Simulate to simulating predictions on test data  (i.e., the test data of the ensemble and base models)
-    for bm in ensemble.base_models:
-        bm.switch_to_test_simulation()
-
-    y_pred = ensemble.ensemble_predict_proba(predictions_test)
-    if number_of_classes == 2:
-        y_pred = y_pred[:, 1]
-    y_test = repo.labels_test(dataset=dataset, fold=fold)
-    print(
-        f"\tROC AUC Test Score for {task}: {roc_auc_score(y_test, y_pred, multi_class='ovr', average='macro')}"
-    )
+    performances = []
     if name == "GES":
-        print(
-            f"\tNumber of different base models in the ensemble: {len(set(ensemble.indices_))}"
-        )
-        models_used = [ensemble.base_models[i].name for i in set(ensemble.indices_)]
-        print(f"\tModels used: {models_used}")
-    elif type(ensemble) == QDOEnsembleSelection:
-        weight_indices = np.where(ensemble.weights_ != 0)[0]
-        print(
-            f"\tNumber of different base models in the ensemble: {len(weight_indices)}"
-        )
-        models_used = [ensemble.base_models[i].name for i in weight_indices]
-        print(f"\tModels used: {models_used}")
+        y_pred_val = ensemble.ensemble_predict_proba(predictions_val)
+        y_pred_test = ensemble.ensemble_predict_proba(predictions_test)
+        if number_of_classes == 2:
+            y_pred_val = y_pred_val[:, 1]
+            y_pred_test = y_pred_test[:, 1]
 
-        # plot_archive(ensemble, name + f"_{task}")
+        y_test = repo.labels_test(dataset=dataset, fold=fold)
+        roc_auc_val = roc_auc_score(y_val, y_pred_val, multi_class="ovr", average="macro")
+        roc_auc_test = roc_auc_score(y_test, y_pred_test, multi_class="ovr", average="macro")
+
+        perf_dict = {
+            "name": name,
+            "roc_auc_val": roc_auc_val,
+            "roc_auc_test": roc_auc_test,
+            "models_used": [ensemble.base_models[i].name for i in set(ensemble.indices_)],
+            "weights": [ensemble.weights_[i] for i in set(ensemble.indices_)],
+        }
+        performances.append(perf_dict)
+    elif type(ensemble) == QDOEnsembleSelection:
+        solutions = [np.array(e.sol) for e in ensemble.archive]
+        unique_tuples = set(tuple(array) for array in solutions)
+        unique_solutions = [np.array(t) for t in unique_tuples]
+        meta = [e.meta for e in ensemble.archive]
+
+        for i, solution in enumerate(unique_solutions):
+            ensemble.weights_ = solution
+            y_pred_val = ensemble.ensemble_predict_proba(predictions_val)
+            y_pred_test = ensemble.ensemble_predict_proba(predictions_test)
+            if number_of_classes == 2:
+                y_pred_val = y_pred_val[:, 1]
+                y_pred_test = y_pred_test[:, 1]
+
+            y_test = repo.labels_test(dataset=dataset, fold=fold)
+            roc_auc_val = roc_auc_score(y_val, y_pred_val, multi_class="ovr", average="macro")
+            roc_auc_test = roc_auc_score(y_test, y_pred_test, multi_class="ovr", average="macro")
+
+            weight_indices = np.where(ensemble.weights_ != 0)[0]
+            perf_dict = {
+                "name": f"{name}_{i}",
+                "roc_auc_val": roc_auc_val,
+                "roc_auc_test": roc_auc_test,
+                "models_used": [ensemble.base_models[i].name for i in weight_indices],
+                "weights": ensemble.weights_[weight_indices],
+                "meta": meta[i],
+            }
+            performances.append(perf_dict)
     else:
         pass
+
+    # Create a DataFrame from the list of performance dictionaries
+    performance_df = pd.DataFrame(performances)
+    performance_df["task"] = task
+    performance_df["dataset"] = dataset
+    performance_df["fold"] = fold
+    performance_df["method"] = name
+    performance_df.to_json(f"results/{name}_{task}.json")
 
 
 def load_data(repo, context_name) -> tuple[list[str], list[str], list[int], dict]:
@@ -368,7 +387,9 @@ def main(
     tasks = initialize_tasks(repo, datasets, folds)
 
     # Evaluate ensemble selection methods for each task
-    for task in tasks:
+    current_time = time.time()
+    for i, task in enumerate(tasks):
+        print(f"Task {i+1}/{len(tasks)}: {task}, elapsed time: {time.time() - current_time:.2f} s")
         base_models, predictions_val, predictions_test = load_and_process_base_models(
             repo, task, configs, all_config_hyperparameters
         )
@@ -445,14 +466,7 @@ def main(
                 ),
                 base_models_metadata_type="custom",
             )
-            evaluate_ensemble(
-                "INFER_TIME_QDO",
-                infer_time_qdo,
-                repo,
-                task,
-                predictions_val,
-                predictions_test,
-            )
+            evaluate_ensemble("INFER_TIME_QDO", infer_time_qdo, repo, task, predictions_val, predictions_test)
 
         # QDO evaluation with ensemble size and loss correlation
         if run_ens_size_qdo:
@@ -465,14 +479,8 @@ def main(
                 random_state=random_seed,
                 behavior_space=get_bs_ensemble_size_and_loss_correlation(),
             )
-            evaluate_ensemble(
-                "ENS_SIZE_QDO",
-                ens_size_qdo,
-                repo,
-                task,
-                predictions_val,
-                predictions_test,
-            )
+            evaluate_ensemble("ENS_SIZE_QDO", ens_size_qdo, repo, task, predictions_val, predictions_test)
+
 
 
 if __name__ == "__main__":
