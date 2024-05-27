@@ -62,13 +62,27 @@ def parse_df_filename(filename):
         return None
 
 
-def parse_dataframes(seeds: list[int]) -> tuple[pd.DataFrame, pd.DataFrame]:
+def get_inference_time(entry, repo, metrics):
+    fold = int(entry["fold"])
+    dataset = repo.task_to_dataset(entry["task"])
+    configs = entry["models_used"]
+
+    # Ensure that the metrics DataFrame is indexed or filtered efficiently
+    selected_metrics = metrics.loc[(dataset, fold, configs)]
+
+    # Sum the 'time_infer_s' values
+    total_inference_time = selected_metrics["time_infer_s"].sum()
+    return total_inference_time
+
+
+def parse_dataframes(
+    seeds: list[int], repo: EvaluationRepository
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     results_path = "results"
-    # Load data from all seeds
-    dfs = []
+    all_dfs = []
     for seed in seeds:
+        dfs_seed = []
         filepath = f"{results_path}/seed_{seed}/"
-        # for all files in the directory
         for file in os.listdir(filepath):
             if file.endswith(".json"):
                 df = pd.read_json(filepath + file)
@@ -78,19 +92,49 @@ def parse_dataframes(seeds: list[int]) -> tuple[pd.DataFrame, pd.DataFrame]:
                 df["task_id"] = task_id
                 df["fold_number"] = fold_number
                 df["seed"] = seed
-                # Sort for first roc_auc_test and then roc_auc_val
-                df = df.sort_values(by=["roc_auc_test", "roc_auc_val"], ascending=False)
-                dfs.append(df)
+                # df = df.sort_values(by=["roc_auc_test", "roc_auc_val"], ascending=False)
+                dfs_seed.append(df)
+        all_dfs.extend(dfs_seed)
 
-    # TODO Average over seeds and keep models_used and weight vectors intact
-    # df = pd.concat(dfs)
-    # df = df.groupby(["method", "task_id", "fold_number"]).mean().reset_index()
-    # print(df)
+    # Concatenate all DataFrames from all seeds
+    df = pd.concat(all_dfs)
 
-    df = pd.concat(dfs)
+    models_used = df["models_used"].explode().unique().tolist()
+    datasets = [repo.task_to_dataset(task) for task in df["task"].unique()]
+    metrics = repo.metrics(datasets=datasets, configs=models_used)
+
+    # Calculate inference times
+    df["inference_time"] = df.apply(get_inference_time, axis=1, args=(repo, metrics))
+
+    # Group by excluding 'seed' and aggregate
+    aggregation_functions = {
+        "name": "first",
+        "roc_auc_val": "mean",
+        "roc_auc_test": "mean",
+        "models_used": "first",  # Consider removing if no longer necessary
+        "weights": "first",
+        "meta": "first",
+        "task": "first",
+        "dataset": "first",
+        "fold": "first",
+        "method": "first",
+        "task_id": "first",
+        "fold_number": "first",
+        "inference_time": "mean",  # Added inference time to aggregation
+    }
+
+    df_grouped = (
+        df.groupby(
+            ["name", "task", "dataset", "fold", "method", "task_id", "fold_number"]
+        )
+        .agg(aggregation_functions)
+        .reset_index(drop=True)
+    )
+
+    # Select only the best per method and task, taking the first entry which should be the best due to prior sorting
     only_best_df = df.groupby(["method", "task"]).first().reset_index()
 
-    return df, only_best_df
+    return df_grouped, only_best_df
 
 
 def parse_single_best() -> dict:
@@ -208,45 +252,26 @@ def normalize_per_task(df_merged: pd.DataFrame):
     return df_merged
 
 
-def get_inference_time(
-    entry, repo: EvaluationRepository, metrics: pd.DataFrame
-) -> float:
-    fold = int(entry["fold"])
-    dataset = repo.task_to_dataset(entry["task"])
-    configs = entry["models_used"]
-
-    # Use .loc to select all relevant rows at once
-    selected_metrics = metrics.loc[(dataset, fold, configs)]
-
-    # Sum the 'time_infer_s' values
-    total_inference_time = selected_metrics["time_infer_s"].sum()
-    return total_inference_time
-
-
 def is_pareto_efficient(costs, return_mask=True):
     is_efficient = np.ones(costs.shape[0], dtype=bool)
     for i, c in enumerate(costs):
-        # None of the other points should have both lower inference time and higher ROC AUC.
-        is_efficient[i] = np.all(np.any(costs[:i] >= c, axis=1)) and np.all(
-            np.any(costs[i + 1 :] >= c, axis=1)
+        # Check if no point is strictly better than `c`.
+        is_efficient[i] = np.all(
+            np.any(costs != c, axis=1) | np.any(costs <= c, axis=1)
         )
     return is_efficient if return_mask else costs[is_efficient]
 
 
 def plot_pareto_front(df, method_name):
     df_method = df[df["method"] == method_name]
+    hypervolumes = {}
 
-    # Ensure directory exists
     plot_dir = "plots/pareto_fronts/"
     if not os.path.exists(plot_dir):
         os.makedirs(plot_dir)
 
-    # Iterate over each unique task
     for task in df_method["task"].unique():
-        # Filter data for the current task
         df_task = df_method[df_method["task"] == task]
-
-        # Prepare the plot
         plt.figure()
         plt.scatter(
             df_task["roc_auc_test"],
@@ -256,18 +281,17 @@ def plot_pareto_front(df, method_name):
             label="All Solutions",
         )
 
-        # Identify non-dominated points
+        # Convert objectives to numpy array
         objectives = np.array(
             [df_task["roc_auc_test"].values, -df_task["inference_time"].values]
         ).T
+
+        # Calculate non-dominated points
         is_efficient = np.isin(
             np.arange(len(objectives)), find_non_dominated(objectives)
         )
-
-        # Extract non-dominated points
         non_dominated = df_task[is_efficient]
 
-        # Plotting non-dominated points distinctly
         plt.scatter(
             non_dominated["roc_auc_test"],
             -non_dominated["inference_time"],
@@ -280,106 +304,75 @@ def plot_pareto_front(df, method_name):
         plt.legend()
         plt.grid(True)
 
-        # Save plot
         plt.tight_layout()
         plt.savefig(f"{plot_dir}{task}_{method_name}_pareto_front.png")
         plt.close()
 
-        # Compute hypervolume
-        ref_point = np.max(objectives, axis=0) + 1  # Define a reference point
+        # Ensure the reference point is beyond the worst values for all objectives
+        ref_point = np.max(objectives, axis=0) + 1
+        assert np.all(
+            ref_point > np.max(objectives, axis=0)
+        ), "Reference point is not set beyond the worst values of objectives."
+
         hv = pg.hypervolume(objectives[is_efficient])
         hypervolume = hv.compute(ref_point)
-        print(
-            f"Hypervolume for {task} under method {method_name} using Test Scores: {hypervolume}"
-        )
+        hypervolumes[task] = hypervolume
+
+    return hypervolumes
 
 
 def find_non_dominated(points):
-    """Identify the indices of non-dominated points"""
-    is_dominated = np.zeros(len(points), dtype=bool)
-    for i in range(len(points)):
-        for j in range(len(points)):
-            if all(points[j] <= points[i]) and any(points[j] < points[i]):
-                is_dominated[i] = True
-                break
-    return np.where(~is_dominated)[0]
+    """Identify the indices of non-dominated points."""
+    is_efficient = np.ones(points.shape[0], dtype=bool)
+    for i, c in enumerate(points):
+        is_efficient[i] = not np.any(
+            np.all(points <= c, axis=1) & np.any(points < c, axis=1)
+        )
+    return np.where(is_efficient)[0]
 
 
-def main():
-    data, n_errors, n_tasks = parse_data("20240419_0917_out.txt")
-    n_configs = 1530
-    print(f"Error count: {n_errors}, error rate: {n_errors/(n_tasks*n_configs):.5f}")
+def plot_hypervolumes(all_hypervolumes):
+    # TODO: create table with hypervolume per dataset (100 entries)
+    # Prepare the data for plotting
+    methods = list(all_hypervolumes.keys())  # Method names
+    hv_values = [list(all_hypervolumes[method].values()) for method in methods]
+    data = []
 
-    # Find tasks with the worst ROC AUC
+    # Creating a DataFrame suitable for Seaborn
+    for method_index, values in enumerate(hv_values):
+        for value in values:
+            data.append({
+                'Method': methods[method_index],
+                'Hypervolume': value
+            })
     df = pd.DataFrame(data)
-    single_best = parse_single_best()
 
-    # Prepare single best model data for merging
-    single_best_data = []
-    for task, (model, test_score, val_score) in single_best.items():
-        single_best_data.append(
-            {
-                "method": "Single Best",
-                "task": task,
-                "roc_auc": test_score,
-                "roc_auc_val": val_score,
-                "models_used": [model],
-                "n_base_models": 1,
-            }
-        )
-    # Convert list of single best data into DataFrame
-    df_single_best = pd.DataFrame(single_best_data)
+    fig, ax = plt.subplots()
 
-    # Concatenate the original data with the single best model data
-    df = pd.concat([df, df_single_best], ignore_index=True)
+    # Use seaborn's violinplot to plot the DataFrame
+    sns.violinplot(x='Method', y='Hypervolume', data=df, ax=ax, cut=0)
 
-    # Sort over tasks
-    df = df.sort_values(by=["task", "method"])
+    ax.set_title("Hypervolume by Method")
+    ax.set_ylabel("Hypervolume")
+    ax.set_yscale("log")  # Using logarithmic scale for better visualization of wide-ranging data
 
-    df = normalized_improvement(df)
-    df = create_ranking_for_dataset(df)
+    # Annotate max and average values on the plot
+    for i, method in enumerate(methods):
+        method_data = df[df['Method'] == method]['Hypervolume']
+        max_value = method_data.max()
+        avg_value = method_data.mean()
+        # Display max value
+        ax.text(i, max_value, f'Max: {max_value:.2f}', color='red', ha='center', va='bottom')
+        # Display average value
+        ax.text(i, avg_value, f'Avg: {avg_value:.2f}', color='blue', ha='center', va='bottom')
 
-    # Load data from tabrepo
-    context_name = "D244_F3_C1530_30"
-    repo: EvaluationRepository = load_repository(context_name, cache=True)
-    df["inference_time"] = df.apply(get_inference_time, axis=1, args=(repo,))
+    plt.xticks(rotation=45)  # Rotate method names for better visibility
+    plt.tight_layout()
 
-    # Remove task_id 3616
-    df = df[df["task_id"] != "3616"]
+    # Save the plot instead of showing it interactively
+    plt.savefig("hypervolume_comparison.png", dpi=300)
+    plt.close()
 
-    # Pareto efficiency
-    # Exclude single best
-    df = df[df["method"] != "Single Best"]
-
-    # Get the pastel color palette with as many colors as there are methods
-    methods = df["method"].unique()
-    palette = sns.color_palette("pastel", len(methods))
-    color_dict = dict(zip(methods, palette))
-
-    # Iterate through each method and plot the Pareto front
-    for method_name in methods:
-        plot_pareto_front(df, method_name, color_dict)
-
-    df_merged = (
-        df.groupby(["task_id", "method"])
-        .agg(
-            {
-                "dataset_rank": "mean",  # or 'first' since all should be identical
-                "roc_auc": "mean",  # Average ROC AUC across folds
-                "inference_time": "mean",  # Average inference time across folds
-            }
-        )
-        .reset_index()
-    )
-    df_merged = normalize_per_task(df_merged)
-
-    boxplot(df_merged, "roc_auc_normalized")
-    boxplot(df, "normalized_improvement")
-    df_merged_infertime_no_outliers = df_merged[
-        (df_merged["inference_time"] < 1.5) & (df_merged["roc_auc_normalized"] > 0.6)
-    ]
-    boxplot(df_merged_infertime_no_outliers, "inference_time")
-    boxplot_ranking(df_merged)
 
 
 if __name__ == "__main__":
@@ -388,19 +381,15 @@ if __name__ == "__main__":
     # GES and single best only produce one solution per task
     reload = False
     if reload:
-        repo = load_repository("D244_F3_C1530_30", cache=True)
-        df, only_best_df = parse_dataframes([0])
-
-        models_used = df["models_used"].explode().unique().tolist()
-        datasets = [repo.task_to_dataset(task) for task in df["task"].unique()]
+        repo = load_repository("D244_F3_C1530_100", cache=True)
+        df, only_best_df = parse_dataframes([0, 1, 2], repo=repo)
 
         # Hash for dataset and models used
-        metrics = repo.metrics(datasets=datasets, configs=models_used)
-        average_inference_time = metrics["time_infer_s"].mean()
-
-        df["inference_time"] = df.apply(
-            get_inference_time, axis=1, args=(repo, metrics)
-        )
+        # metrics = repo.metrics(datasets=datasets, configs=models_used)
+        # average_inference_time = metrics["time_infer_s"].mean()
+        # df["inference_time"] = df.apply(
+        #     get_inference_time, axis=1, args=(repo, metrics)
+        # )
         df = normalize_per_task(df)
 
         df.reset_index(drop=True, inplace=True)
@@ -411,9 +400,12 @@ if __name__ == "__main__":
         # add _ before last digit in all tasks
         df["task"] = df["task"].astype(str).apply(lambda x: x[:-1] + "_" + x[-1])
 
-        plot_pareto_front(df, "QO")
-        plot_pareto_front(df, "QDO")
-        plot_pareto_front(df, "ENS_SIZE_QDO")
-        plot_pareto_front(df, "INFER_TIME_QDO")
+        methods = ["QO", "QDO", "ENS_SIZE_QDO", "INFER_TIME_QDO"]
+        all_hypervolumes = {}
+
+        for method in methods:
+            all_hypervolumes[method] = plot_pareto_front(df, method)
+
+        plot_hypervolumes(all_hypervolumes)
 
     # main()

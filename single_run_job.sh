@@ -3,9 +3,9 @@
 #SBATCH --job-name=ensemble_eval_single
 #SBATCH --output=ensemble_eval_%j.out
 #SBATCH --error=ensemble_eval_%j.err
-#SBATCH --time=04:00:00
+#SBATCH --time=4-00:00:00
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=8GB
+#SBATCH --mem=16GB
 #SBATCH --partition=std
 
 # Load the Anaconda module

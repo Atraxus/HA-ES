@@ -1,3 +1,4 @@
+from collections import Counter
 from phem.methods.ensemble_selection.qdo.behavior_space import BehaviorSpace
 from tabrepo import load_repository, EvaluationRepository, get_context
 
@@ -171,6 +172,7 @@ def evaluate_ensemble(
     dataset = repo.task_to_dataset(task)
     fold = repo.task_to_fold(task)
 
+    y_test = repo.labels_test(dataset=dataset, fold=fold)
     y_val = repo.labels_val(dataset=dataset, fold=fold)
     predictions_val = np.array(predictions_val)
     predictions_test = np.array(predictions_test)
@@ -189,30 +191,46 @@ def evaluate_ensemble(
 
     performances = []
     if name == "GES":
-        y_pred_val = ensemble.ensemble_predict_proba(predictions_val)
-        y_pred_test = ensemble.ensemble_predict_proba(predictions_test)
-        if number_of_classes == 2:
-            y_pred_val = y_pred_val[:, 1]
-            y_pred_test = y_pred_test[:, 1]
+        indices_so_far = []
+        index_counts = Counter()
+        for idx in ensemble.indices_:
+            indices_so_far.append(idx)
+            index_counts.update([idx])
 
-        y_test = repo.labels_test(dataset=dataset, fold=fold)
-        roc_auc_val = roc_auc_score(
-            y_val, y_pred_val, multi_class="ovr", average="macro"
-        )
-        roc_auc_test = roc_auc_score(
-            y_test, y_pred_test, multi_class="ovr", average="macro"
-        )
+            # Calculate weights based on occurrence of each index
+            ensemble.weights_ = np.zeros(len(ensemble.base_models))
+            for index, count in index_counts.items():
+                ensemble.weights_[index] = count / len(indices_so_far)
 
-        perf_dict = {
-            "name": name,
-            "roc_auc_val": roc_auc_val,
-            "roc_auc_test": roc_auc_test,
-            "models_used": [
-                ensemble.base_models[i].name for i in set(ensemble.indices_)
-            ],
-            "weights": [ensemble.weights_[i] for i in set(ensemble.indices_)],
-        }
-        performances.append(perf_dict)
+            selected_indices = list(index_counts.keys())
+            y_pred_val = ensemble.ensemble_predict_proba(
+                predictions_val[selected_indices, :]
+            )
+            y_pred_test = ensemble.ensemble_predict_proba(
+                predictions_test[selected_indices, :]
+            )
+            if number_of_classes == 2:
+                y_pred_val = y_pred_val[:, 1]
+                y_pred_test = y_pred_test[:, 1]
+
+            roc_auc_val = roc_auc_score(
+                y_val, y_pred_val, multi_class="ovr", average="macro"
+            )
+            roc_auc_test = roc_auc_score(
+                y_test, y_pred_test, multi_class="ovr", average="macro"
+            )
+
+            perf_dict = {
+                "iteration": len(indices_so_far),
+                "roc_auc_val": roc_auc_val,
+                "roc_auc_test": roc_auc_test,
+                "models_used": [
+                    ensemble.base_models[i].name for i in set(indices_so_far)
+                ],
+                "weights": [1 / len(indices_so_far)]
+                * len(set(indices_so_far)),  # Uniform weights as example
+            }
+            performances.append(perf_dict)
     elif type(ensemble) == QDOEnsembleSelection:
         solutions = [np.array(e.sol) for e in ensemble.archive]
         unique_tuples = set(tuple(array) for array in solutions)
@@ -227,7 +245,6 @@ def evaluate_ensemble(
                 y_pred_val = y_pred_val[:, 1]
                 y_pred_test = y_pred_test[:, 1]
 
-            y_test = repo.labels_test(dataset=dataset, fold=fold)
             roc_auc_val = roc_auc_score(
                 y_val, y_pred_val, multi_class="ovr", average="macro"
             )
@@ -277,7 +294,9 @@ def initialize_tasks(repo, datasets, folds) -> list[str]:
     return tasks
 
 
-def load_and_process_base_models(repo, task, configs, all_config_hyperparameters):
+def load_and_process_base_models(
+    metrics, repo, task, configs, all_config_hyperparameters
+):
     dataset = repo.task_to_dataset(task)
     fold = repo.task_to_fold(task)
 
@@ -286,8 +305,6 @@ def load_and_process_base_models(repo, task, configs, all_config_hyperparameters
     predictions_val = []
     predictions_test = []
     for config in configs:
-        # Fetch metadata
-        metrics = repo.metrics(datasets=[dataset], configs=[config])
         try:
             time_infer_s = metrics.loc[(dataset, fold, config), "time_infer_s"]
             time_train_s = metrics.loc[(dataset, fold, config), "time_train_s"]
@@ -385,7 +402,7 @@ def evaluate_single_best_model(
 
 
 def main(
-    random_seed: int = 1,
+    random_seed: int = 0,
     run_singleBest: bool = False,
     run_ges: bool = False,
     run_qo: bool = False,
@@ -402,6 +419,8 @@ def main(
     # A task is a fold of a dataset
     tasks = initialize_tasks(repo, datasets, folds)
 
+    metrics = repo.metrics(datasets=datasets, folds=folds, configs=configs)
+
     # Evaluate ensemble selection methods for each task
     current_time = time.time()
     for i, task in enumerate(tasks):
@@ -410,7 +429,7 @@ def main(
         )
         current_time = time.time()
         base_models, predictions_val, predictions_test = load_and_process_base_models(
-            repo, task, configs, all_config_hyperparameters
+            metrics, repo, task, configs, all_config_hyperparameters
         )
 
         # Adjusting the metric based on the task
@@ -547,8 +566,8 @@ if __name__ == "__main__":
         args.seed,
         run_singleBest=False,
         run_ges=True,
-        run_qo=True,
-        run_qdo=True,
-        run_infer_time_qdo=True,
-        run_ens_size_qdo=True,
+        run_qo=False,
+        run_qdo=False,
+        run_infer_time_qdo=False,
+        run_ens_size_qdo=False,
     )
