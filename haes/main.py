@@ -359,6 +359,7 @@ def evaluate_single_best_model(
     ensemble: list[FakedFittedAndValidatedClassificationBaseModel],
     repo: EvaluationRepository,
     task: str,
+    seed: int = 1,
 ):
     dataset = repo.task_to_dataset(task)
     fold = repo.task_to_fold(task)
@@ -370,35 +371,48 @@ def evaluate_single_best_model(
     best_model = None
     for model in ensemble:
         model.switch_to_val_simulation()  # Ensure the model returns validation predictions
-        predicted_probs = model.predict_proba(
-            None
-        )  # Since predictions are pre-stored, no need to pass X
-        score = roc_auc_score(
-            y_val, predicted_probs, multi_class="ovr", average="macro"
-        )
+        predicted_probs = model.predict_proba(None)  # Since predictions are pre-stored, no need to pass X
+        score = roc_auc_score(y_val, predicted_probs, multi_class="ovr", average="macro")
         if score > best_score:
             best_score = score
             best_model = model
 
     # Now evaluate the best model on test data
     best_model.switch_to_test_simulation()  # Switch to test predictions
-    predicted_probs_test = best_model.predict_proba(
-        None
-    )  # No X needed as predictions are pre-stored
-    test_score = roc_auc_score(
-        y_test, predicted_probs_test, multi_class="ovr", average="macro"
-    )
-    print(f"Best Model {best_model.name} ROC AUC Test Score for {task}: {test_score}")
+    predicted_probs_test = best_model.predict_proba(None)  # No X needed as predictions are pre-stored
+    test_score = roc_auc_score(y_test, predicted_probs_test, multi_class="ovr", average="macro")
 
     # Also on validation data
     best_model.switch_to_val_simulation()
     predicted_probs_val = best_model.predict_proba(None)
-    val_score = roc_auc_score(
-        y_val, predicted_probs_val, multi_class="ovr", average="macro"
-    )
-    print(
-        f"Best Model {best_model.name} ROC AUC Validation Score for {task}: {val_score}"
-    )
+    val_score = roc_auc_score(y_val, predicted_probs_val, multi_class="ovr", average="macro")
+
+    # Creating performance dictionary and saving to DataFrame
+    performance_dict = {
+        "name": best_model.name,
+        "roc_auc_val": val_score,
+        "roc_auc_test": test_score,
+        "task_id": task.split('_')[0],
+        "fold": fold,
+        "method": "SINGLE_BEST"
+    }
+    
+    performance_df = pd.DataFrame([performance_dict])  # Convert dict to DataFrame
+    performance_df["dataset"] = dataset
+    performance_df["method"] = "SINGLE_BEST"
+
+    # Check and create directory if needed
+    result_path = f"results/seed_{seed}"
+    if not os.path.exists(result_path):
+        os.makedirs(result_path)
+        
+    # Save DataFrame to JSON
+    performance_df.to_json(f"{result_path}/SINGLE_BEST_{task}.json")
+
+    # Optionally print out results for verification
+    print(f"Best Model {best_model.name} ROC AUC Test Score for {task}: {test_score}")
+    print(f"Best Model {best_model.name} ROC AUC Validation Score for {task}: {val_score}")
+
 
 
 def main(
@@ -449,7 +463,7 @@ def main(
 
         # Single best model evaluation
         if run_singleBest:
-            evaluate_single_best_model(base_models, repo, task)
+            evaluate_single_best_model(base_models, repo, task, seed=random_seed)
 
         # GES evaluation
         if run_ges:
@@ -564,8 +578,8 @@ if __name__ == "__main__":
     args = parse_args()
     main(
         args.seed,
-        run_singleBest=False,
-        run_ges=True,
+        run_singleBest=True,
+        run_ges=False,
         run_qo=False,
         run_qdo=False,
         run_infer_time_qdo=False,

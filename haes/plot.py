@@ -171,131 +171,56 @@ def parse_dataframes(
         print("Found duplicates:")
         print(duplicates)
 
-    return df_grouped_by_seed
+    return df_grouped_by_seed, metrics
 
 
-def parse_single_best() -> dict:
+def parse_single_best(repo) -> pd.DataFrame:
     with open("data/single_best_out2.txt", "r") as f:
         data = f.read()
 
-    # Example: Best Model RandomForest_r114_BAG_L1 ROC AUC Test Score for 3616_2: 0.6602564102564102
     data_pattern = re.compile(
         r"Best Model (\w+) ROC AUC Test Score for (\d+_\d+): ([\d\.]+)\n"
         r"Best Model \w+ ROC AUC Validation Score for \d+_\d+: ([\d\.]+)"
     )
     matches = data_pattern.findall(data)
 
-    single_best = {}
+    # Prepare data for DataFrame
+    df_records = []
+    model_names = set(match[0] for match in matches)  # Collect unique model names
+    task_ids = set(match[1] for match in matches)  # Collect unique task IDs
+
+    # Retrieve metrics based on tasks and models
+    datasets = [repo.task_to_dataset(task.split("_")[0]) for task in task_ids]
+    metrics = repo.metrics(datasets=datasets, configs=list(model_names))
+
     for match in matches:
-        single_best[match[1]] = (match[0], float(match[2]), float(match[3]))
+        task_id, fold = match[1].split("_")
+        name = match[0]
+        roc_auc_test = float(match[2])
+        roc_auc_val = float(match[3])
 
-    return single_best
+        # Calculate inference time for the single best model
+        dataset = repo.task_to_dataset(task_id)
+        if (dataset, int(fold), name) in metrics.index:
+            selected_metrics = metrics.loc[(dataset, int(fold), name)]
+            inference_time = selected_metrics["time_infer_s"].sum()
+        else:
+            inference_time = 0  # Default to 0 if no metrics available
 
-
-def boxplot(df: pd.DataFrame, y_str: str):
-    if y_str not in df.columns:
-        raise ValueError(f"Column '{y_str}' not found in DataFrame")
-
-    # Plot ROC AUC scores for each method
-    plt.figure(figsize=(14, 7))
-    sns.boxplot(x="method", y=y_str, data=df, palette="pastel", linewidth=2)
-    plt.title("Performance of Ensemble Methods: " + y_str)
-    plt.ylabel(y_str)
-    plt.xlabel("Ensemble Method")
-    plt.xticks(rotation=45)
-    plt.grid(True)
-    plt.tight_layout()
-
-    # save to file
-    plt.savefig("plots/performance_" + y_str + ".png", dpi=300)
-
-
-def boxplot_ranking(df: pd.DataFrame):
-    rankings = []
-    for method in df["method"].unique():
-        rankings.append(df[df["method"] == method]["dataset_rank"].values)
-
-    x_ticks = df["method"].unique()
-
-    # Plot ranking for each method
-    plt.figure(figsize=(14, 7))
-    sns.boxplot(data=rankings, palette="pastel", linewidth=2)
-    plt.title("Ranking of Ensemble Methods: " + "dataset_rank")
-    plt.ylabel("dataset_rank")
-    plt.gca().invert_yaxis()
-    plt.xlabel("Ensemble Method")
-    plt.xticks(rotation=45)
-    plt.xticks(range(len(x_ticks)), x_ticks)
-    plt.grid(True)
-    plt.tight_layout()
-
-    # save to file
-    plt.savefig("plots/performance_" + "dataset_rank" + ".png", dpi=300)
-
-
-def normalized_improvement(df: pd.DataFrame):
-    # Assuming 'method', 'task', and 'roc_auc' are columns in df
-    df["dataset"] = df["task"].apply(lambda x: x.split("_")[0])
-
-    # Compute the minimum and range of ROC AUC per dataset
-    stats = df.groupby("dataset")["roc_auc"].agg(["min", "max"]).reset_index()
-    stats["range"] = stats["max"] - stats["min"]
-
-    # Merge these stats back into the original dataframe
-    df = df.merge(stats[["dataset", "min", "range"]], on="dataset", how="left")
-
-    # Calculate normalized improvement
-    df["normalized_improvement"] = df.apply(
-        lambda x: (x["roc_auc"] - x["min"]) / x["range"] if x["range"] != 0 else 0,
-        axis=1,
-    )
-
-    return df
-
-
-def create_ranking_for_dataset(df: pd.DataFrame):
-    # Split 'task' into 'task_id' (dataset ID) and 'fold'
-    df["task_id"] = df["task"].apply(lambda x: x.split("_")[0])
-    df["fold"] = df["task"].apply(lambda x: x.split("_")[1])
-
-    # Calculate average ROC AUC for each method within each dataset
-    avg_scores = (
-        df.groupby(["task_id", "method"])["roc_auc"]
-        .mean()
-        .reset_index(name="roc_auc_avg")
-    )
-
-    # Rank methods within each dataset based on their average ROC AUC
-    avg_scores["dataset_rank"] = avg_scores.groupby("task_id")["roc_auc_avg"].rank(
-        ascending=False, method="dense"
-    )
-
-    # Merge these ranks back to the original dataframe
-    df = df.merge(
-        avg_scores[["task_id", "method", "dataset_rank"]],
-        on=["task_id", "method"],
-        how="left",
-    )
-
-    return df
-
-
-def normalize_per_task(df_merged: pd.DataFrame):
-    # Normalize ROC AUC scores per task_id
-    df_merged["roc_auc_normalized"] = df_merged.groupby("task_id")[
-        "roc_auc_test"
-    ].transform(lambda x: (x - x.min()) / (x.max() - x.min()))
-
-    return df_merged
-
-
-def is_pareto_efficient(costs, return_mask=True):
-    is_efficient = np.ones(costs.shape[0], dtype=bool)
-    for i, c in enumerate(costs):
-        is_efficient[i] = not np.any(
-            np.all(costs <= c, axis=1) & np.any(costs < c, axis=1)
+        df_records.append(
+            {
+                "name": name,
+                "roc_auc_val": roc_auc_val,
+                "roc_auc_test": roc_auc_test,
+                "meta": 1,
+                "task_id": task_id,
+                "method": "SINGLE_BEST",
+                "inference_time": inference_time,
+            }
         )
-    return is_efficient if return_mask else costs[is_efficient]
+
+    single_best_df = pd.DataFrame(df_records)
+    return single_best_df
 
 
 def normalize_data(data, high_is_better=True):
@@ -317,6 +242,49 @@ def normalize_data(data, high_is_better=True):
     return normalized_data
 
 
+def normalize_per_task_and_method(df):
+    # Apply normalization based on 'method' and 'task_id'
+    for method_name in df["method"].unique():
+        for task_id in df[df["method"] == method_name]["task_id"].unique():
+            mask = (df["method"] == method_name) & (df["task_id"] == task_id)
+            df.loc[mask, "normalized_roc_auc"] = normalize_data(
+                -df.loc[mask, "roc_auc_test"], high_is_better=False
+            )
+            df.loc[mask, "normalized_time"] = normalize_data(
+                df.loc[mask, "inference_time"], high_is_better=False
+            )
+    return df
+
+
+def boxplot(df: pd.DataFrame, y_str: str, log_y_scale: bool = False):
+    if y_str not in df.columns:
+        raise ValueError(f"Column '{y_str}' not found in DataFrame")
+
+    # Plot ROC AUC scores for each method
+    plt.figure(figsize=(14, 7))
+    sns.boxplot(x="method", y=y_str, data=df, palette="pastel", linewidth=2)
+    plt.title("Performance of Ensemble Methods: " + y_str)
+    plt.ylabel(y_str)
+    if log_y_scale:
+        plt.yscale("log")
+    plt.xlabel("Ensemble Method")
+    plt.xticks(rotation=45)
+    plt.grid(True)
+    plt.tight_layout()
+
+    # save to file
+    plt.savefig("plots/boxplot_" + y_str + ".png", dpi=300)
+
+
+def is_pareto_efficient(costs, return_mask=True):
+    is_efficient = np.ones(costs.shape[0], dtype=bool)
+    for i, c in enumerate(costs):
+        is_efficient[i] = not np.any(
+            np.all(costs <= c, axis=1) & np.any(costs < c, axis=1)
+        )
+    return is_efficient if return_mask else costs[is_efficient]
+
+
 def plot_pareto_front(df, method_name):
     df_method = df[df["method"] == method_name]
     hypervolumes = {}
@@ -325,15 +293,7 @@ def plot_pareto_front(df, method_name):
     os.makedirs(plot_dir, exist_ok=True)
 
     for task_id in df_method["task_id"].unique():
-        df_task = df_method[df_method["task_id"] == task_id].copy()
-
-        # Apply min max normalization to negated roc_auc and inference time
-        df_task.loc[:, "normalized_roc_auc"] = normalize_data(
-            -df_task["roc_auc_test"], high_is_better=False
-        )
-        df_task.loc[:, "normalized_time"] = normalize_data(
-            df_task["inference_time"], high_is_better=False
-        )
+        df_task = df_method[df_method["task_id"] == task_id]
 
         plt.figure()
         plt.scatter(
@@ -585,28 +545,20 @@ def cd_evaluation(
 
 
 if __name__ == "__main__":
-    reload = False
+    reload = True
     if reload:
         repo = load_repository("D244_F3_C1530_100", cache=True)
         df = parse_dataframes([0, 1, 2], repo=repo)
-        df = normalize_per_task(df)
+        single_best_df = parse_single_best(repo)
+        df = pd.concat([df, single_best_df], ignore_index=True)
 
         df.reset_index(drop=True, inplace=True)
-        # df["task"] = df["task"].astype(str)
         df.to_json("data/full.json")
     else:
         df = pd.read_json("data/full.json")
-
-        # Initialize dictionary to store results
-        min_num_solutions_per_task = {}
-        avg_solutions_per_method = {}
-        task_ids = df["task_id"].unique()
-        methods = df["method"].unique()
-
-        print(df.groupby("method").head())
+        normalize_per_task_and_method(df)
         print(df.head())
         print(df.shape)
-        print(df.columns)
 
         methods = ["GES", "QO", "QDO", "ENS_SIZE_QDO", "INFER_TIME_QDO"]
         all_hypervolumes = {}
@@ -638,5 +590,11 @@ if __name__ == "__main__":
 
         # Now you can use the modified cd_evaluation function
         result = cd_evaluation(pivot_hypervolumes, maximize_metric=True)
+        print(df.columns)
+
+        # Plot boxplot for inference time and performance
+        df["normalized_roc_auc"] = 1 - df["normalized_roc_auc"]
+        boxplot(df, "normalized_time")
+        boxplot(df, "normalized_roc_auc")
 
     # main()
