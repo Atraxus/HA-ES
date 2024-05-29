@@ -1,9 +1,12 @@
+import math
 import re
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 import pygmo as pg
+from autorank._util import get_sorted_rank_groups
+from autorank import autorank, plot_stats
 
 from tabrepo import load_repository, EvaluationRepository
 import os
@@ -65,16 +68,23 @@ def parse_df_filename(filename):
 def get_inference_time(entry, repo, metrics):
     fold = int(entry["fold"])
     dataset = repo.task_to_dataset(entry["task"])
-    configs = entry["models_used"]
+    configs = entry["models_used"]  # This is a tuple of configurations
 
-    # Ensure that the metrics DataFrame is indexed or filtered efficiently
-    selected_metrics = metrics.loc[(dataset, fold, configs)]
+    # Initialize total inference time
+    total_inference_time = 0
 
-    # Sum the 'time_infer_s' values
-    total_inference_time = selected_metrics["time_infer_s"].sum()
+    # Iterate over each configuration in the tuple
+    for config in configs:
+        # Select the metrics for each configuration
+        if (dataset, fold, config) in metrics.index:
+            selected_metrics = metrics.loc[(dataset, fold, config)]
+            # Sum the 'time_infer_s' values for each configuration and add to total
+            total_inference_time += selected_metrics["time_infer_s"].sum()
+
     return total_inference_time
 
 
+# TODO: remove duplicate solutions
 def parse_dataframes(
     seeds: list[int], repo: EvaluationRepository
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -90,51 +100,78 @@ def parse_dataframes(
                 df["method"] = method_name
                 df["task"] = f"{task_id}_{fold_number}"
                 df["task_id"] = task_id
-                df["fold_number"] = fold_number
                 df["seed"] = seed
-                # df = df.sort_values(by=["roc_auc_test", "roc_auc_val"], ascending=False)
+                if method_name == "GES":  # Post processing due to wrong output
+                    df["name"] = df.apply(
+                        lambda row: f"{method_name}_{row['iteration']}", axis=1
+                    )
                 dfs_seed.append(df)
+
         all_dfs.extend(dfs_seed)
 
     # Concatenate all DataFrames from all seeds
     df = pd.concat(all_dfs)
+    print(f"df shape: {df.shape}")
 
+    # Remove duplicate solutions if models_used are identical for task, method and seed
+    df["models_used"] = df["models_used"].apply(tuple)  # Make models_used hashable
+    df = df.drop_duplicates(
+        subset=["task", "seed", "method", "models_used"], keep="first"
+    )
+
+    # Remove entries where the number of models used is one or less
+    # df = df[df["models_used"].apply(len) > 1]
+    print(f"df (unique) shape: {df.shape}")
+
+    # Inference times
     models_used = df["models_used"].explode().unique().tolist()
     datasets = [repo.task_to_dataset(task) for task in df["task"].unique()]
     metrics = repo.metrics(datasets=datasets, configs=models_used)
-
-    # Calculate inference times
     df["inference_time"] = df.apply(get_inference_time, axis=1, args=(repo, metrics))
 
-    # Group by excluding 'seed' and aggregate
-    aggregation_functions = {
+    # Group by folds first and aggregate
+    fold_aggregation_functions = {
         "name": "first",
         "roc_auc_val": "mean",
         "roc_auc_test": "mean",
-        "models_used": "first",  # Consider removing if no longer necessary
-        "weights": "first",
         "meta": "first",
-        "task": "first",
-        "dataset": "first",
-        "fold": "first",
-        "method": "first",
         "task_id": "first",
-        "fold_number": "first",
-        "inference_time": "mean",  # Added inference time to aggregation
+        "method": "first",
+        "inference_time": "mean",
     }
 
-    df_grouped = (
-        df.groupby(
-            ["name", "task", "dataset", "fold", "method", "task_id", "fold_number"]
-        )
-        .agg(aggregation_functions)
+    df_grouped_by_fold = (
+        df.groupby(["name", "task_id", "method", "seed"])
+        .agg(fold_aggregation_functions)
         .reset_index(drop=True)
     )
 
-    # Select only the best per method and task, taking the first entry which should be the best due to prior sorting
-    only_best_df = df.groupby(["method", "task"]).first().reset_index()
+    # Now group by seeds and aggregate
+    seed_aggregation_functions = {
+        "name": "first",
+        "roc_auc_val": "mean",
+        "roc_auc_test": "mean",
+        "meta": "first",
+        "task_id": "first",
+        "method": "first",
+        "inference_time": "mean",
+    }
 
-    return df_grouped, only_best_df
+    df_grouped_by_seed = (
+        df_grouped_by_fold.groupby(["name", "task_id", "method"])
+        .agg(seed_aggregation_functions)
+        .reset_index(drop=True)
+    )
+
+    # Check for duplicates
+    duplicates = df_grouped_by_seed[
+        df_grouped_by_seed.duplicated(subset=["name", "task_id"], keep=False)
+    ]
+    if not duplicates.empty:
+        print("Found duplicates:")
+        print(duplicates)
+
+    return df_grouped_by_seed
 
 
 def parse_single_best() -> dict:
@@ -255,11 +292,29 @@ def normalize_per_task(df_merged: pd.DataFrame):
 def is_pareto_efficient(costs, return_mask=True):
     is_efficient = np.ones(costs.shape[0], dtype=bool)
     for i, c in enumerate(costs):
-        # Check if no point is strictly better than `c`.
-        is_efficient[i] = np.all(
-            np.any(costs != c, axis=1) | np.any(costs <= c, axis=1)
+        is_efficient[i] = not np.any(
+            np.all(costs <= c, axis=1) & np.any(costs < c, axis=1)
         )
     return is_efficient if return_mask else costs[is_efficient]
+
+
+def normalize_data(data, high_is_better=True):
+    """Normalize data to [0, 1] range; handle cases with NaN or zero range."""
+    min_val = np.nanmin(data)  # Use nanmin to ignore NaNs
+    max_val = np.nanmax(data)  # Use nanmax to ignore NaNs
+
+    if np.isnan(min_val) or np.isnan(max_val):
+        raise ValueError("Data contains NaN values which cannot be normalized.")
+
+    if max_val == min_val:
+        # Handle the case where all data points are the same or NaNs are present
+        return np.zeros_like(data)
+
+    normalized_data = (data - min_val) / (max_val - min_val)
+    if high_is_better:
+        normalized_data = 1 - normalized_data
+
+    return normalized_data
 
 
 def plot_pareto_front(df, method_name):
@@ -267,56 +322,58 @@ def plot_pareto_front(df, method_name):
     hypervolumes = {}
 
     plot_dir = "plots/pareto_fronts/"
-    if not os.path.exists(plot_dir):
-        os.makedirs(plot_dir)
+    os.makedirs(plot_dir, exist_ok=True)
 
-    for task in df_method["task"].unique():
-        df_task = df_method[df_method["task"] == task]
+    for task_id in df_method["task_id"].unique():
+        df_task = df_method[df_method["task_id"] == task_id].copy()
+
+        # Apply min max normalization to negated roc_auc and inference time
+        df_task.loc[:, "normalized_roc_auc"] = normalize_data(
+            -df_task["roc_auc_test"], high_is_better=False
+        )
+        df_task.loc[:, "normalized_time"] = normalize_data(
+            df_task["inference_time"], high_is_better=False
+        )
+
         plt.figure()
         plt.scatter(
-            df_task["roc_auc_test"],
-            -df_task["inference_time"],
+            df_task["normalized_roc_auc"],
+            df_task["normalized_time"],
             c="gray",
             alpha=0.5,
             label="All Solutions",
         )
 
-        # Convert objectives to numpy array
         objectives = np.array(
-            [df_task["roc_auc_test"].values, -df_task["inference_time"].values]
+            [df_task["normalized_roc_auc"].values, df_task["normalized_time"].values]
         ).T
 
-        # Calculate non-dominated points
-        is_efficient = np.isin(
-            np.arange(len(objectives)), find_non_dominated(objectives)
-        )
-        non_dominated = df_task[is_efficient]
+        is_efficient = is_pareto_efficient(objectives)
+        non_dominated = df_task.iloc[is_efficient]
 
         plt.scatter(
-            non_dominated["roc_auc_test"],
-            -non_dominated["inference_time"],
+            non_dominated["normalized_roc_auc"],
+            non_dominated["normalized_time"],
             c="blue",
             label="Pareto Front",
         )
-        plt.title(f"Pareto Front for {task} using Test Scores")
-        plt.xlabel("ROC AUC Test")
-        plt.ylabel("Inference Time")
+        plt.title(f"Pareto Front for {task_id} using Normalized Scores")
+        plt.xlabel("Normalized Negated ROC AUC Test")
+        plt.ylabel("Normalized Inference Time")
         plt.legend()
         plt.grid(True)
 
         plt.tight_layout()
-        plt.savefig(f"{plot_dir}{task}_{method_name}_pareto_front.png")
+        plt.savefig(f"{plot_dir}{task_id}_{method_name}_pareto_front.png")
         plt.close()
 
-        # Ensure the reference point is beyond the worst values for all objectives
-        ref_point = np.max(objectives, axis=0) + 1
-        assert np.all(
-            ref_point > np.max(objectives, axis=0)
-        ), "Reference point is not set beyond the worst values of objectives."
-
+        ref_point = [
+            1,  # reference point beyond the worst values of objectives for normalized scores
+            1,
+        ]
         hv = pg.hypervolume(objectives[is_efficient])
         hypervolume = hv.compute(ref_point)
-        hypervolumes[task] = hypervolume
+        hypervolumes[task_id] = hypervolume
 
     return hypervolumes
 
@@ -332,7 +389,6 @@ def find_non_dominated(points):
 
 
 def plot_hypervolumes(all_hypervolumes):
-    # TODO: create table with hypervolume per dataset (100 entries)
     # Prepare the data for plotting
     methods = list(all_hypervolumes.keys())  # Method names
     hv_values = [list(all_hypervolumes[method].values()) for method in methods]
@@ -341,71 +397,246 @@ def plot_hypervolumes(all_hypervolumes):
     # Creating a DataFrame suitable for Seaborn
     for method_index, values in enumerate(hv_values):
         for value in values:
-            data.append({
-                'Method': methods[method_index],
-                'Hypervolume': value
-            })
+            data.append({"Method": methods[method_index], "Hypervolume": value})
     df = pd.DataFrame(data)
 
-    fig, ax = plt.subplots()
+    # Set the figure size and style
+    sns.set(
+        style="whitegrid"
+    )  # Set the background to a white grid for better visibility
+    plt.figure(figsize=(10, 6))
 
-    # Use seaborn's violinplot to plot the DataFrame
-    sns.violinplot(x='Method', y='Hypervolume', data=df, ax=ax, cut=0)
+    # Use seaborn's boxplot to plot the DataFrame and create an axis object
+    ax = sns.boxplot(
+        x="Method", y="Hypervolume", data=df, palette="Set2"
+    )  # You can choose a palette that fits your taste
 
-    ax.set_title("Hypervolume by Method")
-    ax.set_ylabel("Hypervolume")
-    ax.set_yscale("log")  # Using logarithmic scale for better visualization of wide-ranging data
+    # Set titles and labels using the axis object
+    ax.set_title("Comparison of Hypervolume by Method", fontsize=16, fontweight="bold")
+    ax.set_xlabel("Method", fontsize=14)
+    ax.set_ylabel("Hypervolume", fontsize=14)
 
-    # Annotate max and average values on the plot
-    for i, method in enumerate(methods):
-        method_data = df[df['Method'] == method]['Hypervolume']
-        max_value = method_data.max()
-        avg_value = method_data.mean()
-        # Display max value
-        ax.text(i, max_value, f'Max: {max_value:.2f}', color='red', ha='center', va='bottom')
-        # Display average value
-        ax.text(i, avg_value, f'Avg: {avg_value:.2f}', color='blue', ha='center', va='bottom')
+    # Set font size for ticks directly on the axes
+    ax.tick_params(
+        axis="x", labelrotation=45, labelsize=12
+    )  # Rotate x-ticks to avoid overlap
+    ax.tick_params(axis="y", labelsize=12)
 
-    plt.xticks(rotation=45)  # Rotate method names for better visibility
-    plt.tight_layout()
-
-    # Save the plot instead of showing it interactively
-    plt.savefig("hypervolume_comparison.png", dpi=300)
+    plt.tight_layout()  # Adjust the plot to fit into the figure area nicely
+    plt.savefig(
+        "hypervolume_comparison.png", dpi=300
+    )  # Save the figure with high resolution
     plt.close()
 
 
+def _custom_cd_diagram(result, reverse, ax, width):
+    """
+    !TAKEN FROM AUTORANK WITH MODIFICATIONS!
+    """
+
+    def plot_line(line, color="k", **kwargs):
+        ax.plot(
+            [pos[0] / width for pos in line],
+            [pos[1] / height for pos in line],
+            color=color,
+            **kwargs,
+        )
+
+    def plot_text(x, y, s, *args, **kwargs):
+        ax.text(x / width, y / height, s, *args, **kwargs)
+
+    sorted_ranks, names, groups = get_sorted_rank_groups(result, reverse)
+    cd = result.cd
+
+    lowv = min(1, int(math.floor(min(sorted_ranks))))
+    highv = max(len(sorted_ranks), int(math.ceil(max(sorted_ranks))))
+    cline = 0.4
+    textspace = 1
+    scalewidth = width - 2 * textspace
+
+    def rankpos(rank):
+        if not reverse:
+            relative_rank = rank - lowv
+        else:
+            relative_rank = highv - rank
+        return textspace + scalewidth / (highv - lowv) * relative_rank
+
+    linesblank = 0.2 + 0.2 + (len(groups) - 1) * 0.1
+
+    # add scale
+    distanceh = 0.1
+    cline += distanceh
+
+    # calculate height needed height of an image
+    minnotsignificant = max(2 * 0.2, linesblank)
+    height = cline + ((len(sorted_ranks) + 1) / 2) * 0.2 + minnotsignificant
+
+    if ax is None:
+        fig = plt.figure(figsize=(width, height))
+        fig.set_facecolor("white")
+        ax = fig.add_axes([0, 0, 1, 1])  # reverse y axis
+    ax.set_axis_off()
+
+    # Upper left corner is (0,0).
+    ax.plot([0, 1], [0, 1], c="w")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(1, 0)
+
+    plot_line([(textspace, cline), (width - textspace, cline)], linewidth=0.7)
+
+    bigtick = 0.1
+    smalltick = 0.05
+
+    tick = None
+    for a in list(np.arange(lowv, highv, 0.5)) + [highv]:
+        tick = smalltick
+        if a == int(a):
+            tick = bigtick
+        plot_line([(rankpos(a), cline - tick / 2), (rankpos(a), cline)], linewidth=0.7)
+
+    for a in range(lowv, highv + 1):
+        plot_text(rankpos(a), cline - tick / 2 - 0.05, str(a), ha="center", va="bottom")
+
+    for i in range(math.ceil(len(sorted_ranks) / 2)):
+        chei = cline + minnotsignificant + i * 0.2
+        plot_line(
+            [
+                (rankpos(sorted_ranks[i]), cline),
+                (rankpos(sorted_ranks[i]), chei),
+                (textspace - 0.1, chei),
+            ],
+            linewidth=0.7,
+        )
+        plot_text(textspace - 0.2, chei, names[i], ha="right", va="center")
+
+    for i in range(math.ceil(len(sorted_ranks) / 2), len(sorted_ranks)):
+        chei = cline + minnotsignificant + (len(sorted_ranks) - i - 1) * 0.2
+        plot_line(
+            [
+                (rankpos(sorted_ranks[i]), cline),
+                (rankpos(sorted_ranks[i]), chei),
+                (textspace + scalewidth + 0.1, chei),
+            ],
+            linewidth=0.7,
+        )
+        plot_text(textspace + scalewidth + 0.2, chei, names[i], ha="left", va="center")
+
+    # upper scale
+    if not reverse:
+        begin, end = rankpos(lowv), rankpos(lowv + cd)
+    else:
+        begin, end = rankpos(highv), rankpos(highv - cd)
+    distanceh += 0.15
+    bigtick /= 2
+    plot_line([(begin, distanceh), (end, distanceh)], linewidth=0.7)
+    plot_line(
+        [(begin, distanceh + bigtick / 2), (begin, distanceh - bigtick / 2)],
+        linewidth=0.7,
+    )
+    plot_line(
+        [(end, distanceh + bigtick / 2), (end, distanceh - bigtick / 2)], linewidth=0.7
+    )
+    plot_text((begin + end) / 2, distanceh - 0.05, "CD", ha="center", va="bottom")
+
+    # no-significance lines
+    side = 0.05
+    no_sig_height = 0.1
+    start = cline + 0.2
+    for l, r in groups:
+        plot_line(
+            [
+                (rankpos(sorted_ranks[l]) - side, start),
+                (rankpos(sorted_ranks[r]) + side, start),
+            ],
+            linewidth=2.5,
+        )
+        start += no_sig_height
+
+    return ax
+
+
+def cd_evaluation(
+    hypervolumes,
+    maximize_metric=True,
+    plt_title="Critical Difference Plot",
+):
+    """
+    hypervolumes: DataFrame with method names as columns and tasks as rows, each cell contains hypervolume.
+    maximize_metric: Boolean, True if higher values are better.
+    output_path: Where to save the plot, if None, plot will not be saved.
+    plt_title: Title of the plot.
+    """
+    # Prepare data
+    rank_data = -hypervolumes if maximize_metric else hypervolumes
+
+    # Run autorank
+    result = autorank(rank_data, alpha=0.05, verbose=False, order="ascending")
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(12, 8))
+    plot_stats(result, ax=ax)
+    plt.title(plt_title)
+    plt.tight_layout()
+
+    plt.savefig("critical_difference.png", bbox_inches="tight", dpi=300)
+    plt.close()
+
+    return result
+
 
 if __name__ == "__main__":
-    # df contains all solutions the methods created during optimization
-    # only_best_df contains only the best solution for each task
-    # GES and single best only produce one solution per task
     reload = False
     if reload:
         repo = load_repository("D244_F3_C1530_100", cache=True)
-        df, only_best_df = parse_dataframes([0, 1, 2], repo=repo)
-
-        # Hash for dataset and models used
-        # metrics = repo.metrics(datasets=datasets, configs=models_used)
-        # average_inference_time = metrics["time_infer_s"].mean()
-        # df["inference_time"] = df.apply(
-        #     get_inference_time, axis=1, args=(repo, metrics)
-        # )
+        df = parse_dataframes([0, 1, 2], repo=repo)
         df = normalize_per_task(df)
 
         df.reset_index(drop=True, inplace=True)
-        df["task"] = df["task"].astype(str)
+        # df["task"] = df["task"].astype(str)
         df.to_json("data/full.json")
     else:
         df = pd.read_json("data/full.json")
-        # add _ before last digit in all tasks
-        df["task"] = df["task"].astype(str).apply(lambda x: x[:-1] + "_" + x[-1])
 
-        methods = ["QO", "QDO", "ENS_SIZE_QDO", "INFER_TIME_QDO"]
+        # Initialize dictionary to store results
+        min_num_solutions_per_task = {}
+        avg_solutions_per_method = {}
+        task_ids = df["task_id"].unique()
+        methods = df["method"].unique()
+
+        print(df.groupby("method").head())
+        print(df.head())
+        print(df.shape)
+        print(df.columns)
+
+        methods = ["GES", "QO", "QDO", "ENS_SIZE_QDO", "INFER_TIME_QDO"]
         all_hypervolumes = {}
 
         for method in methods:
             all_hypervolumes[method] = plot_pareto_front(df, method)
 
+        print("Plotting hypervolumes...")
         plot_hypervolumes(all_hypervolumes)
+
+        # Create a DataFrame for all hypervolumes
+        hypervolumes_df = pd.DataFrame(all_hypervolumes)
+
+        # Save the DataFrame as a CSV file
+        print("Saving hypervolume csv...")
+        hypervolumes_df.to_csv("hypervolumes.csv", index=False)
+
+        data = []
+        for method, tasks in all_hypervolumes.items():
+            for task_id, hypervolume in tasks.items():
+                data.append(
+                    {"Task": task_id, "Method": method, "Hypervolume": hypervolume}
+                )
+
+        df_hypervolumes = pd.DataFrame(data)
+        pivot_hypervolumes = df_hypervolumes.pivot(
+            index="Task", columns="Method", values="Hypervolume"
+        )
+
+        # Now you can use the modified cd_evaluation function
+        result = cd_evaluation(pivot_hypervolumes, maximize_metric=True)
 
     # main()
