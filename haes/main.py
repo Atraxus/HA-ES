@@ -221,6 +221,7 @@ def evaluate_ensemble(
             )
 
             perf_dict = {
+                "name": "GES_" + len(indices_so_far),
                 "iteration": len(indices_so_far),
                 "roc_auc_val": roc_auc_val,
                 "roc_auc_test": roc_auc_test,
@@ -389,11 +390,13 @@ def evaluate_single_best_model(
 
     # Creating performance dictionary and saving to DataFrame
     performance_dict = {
-        "name": best_model.name,
+        "name": "SINGLE_BEST",
         "roc_auc_val": val_score,
         "roc_auc_test": test_score,
         "task_id": task.split('_')[0],
         "fold": fold,
+        "models_used": [best_model.name],
+        "weights": [1.0],
         "method": "SINGLE_BEST"
     }
     
