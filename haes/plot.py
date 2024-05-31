@@ -12,48 +12,6 @@ from tabrepo import load_repository, EvaluationRepository
 import os
 
 
-def parse_data(filepath: str) -> tuple[dict, int, int]:
-    with open(filepath, "r") as f:
-        data = f.read()
-
-    # count and remove lines starting with 'Error'
-    n_errors = data.count("Error")
-    for i in range(n_errors):
-        start = data.find("Error")
-        end = data.find("\n", start)
-        data = data[:start] + data[end + 1 :]
-
-    # count lines with 'Fitting ENS_SIZE_QDO'  to know number of tasks
-    n_tasks = data.count("Fitting ENS_SIZE_QDO")
-
-    ensemble_data = []
-    pattern = (
-        r"Fitting (\w+) for task (\d+_\d+), dataset \b[\w-]+\b, fold \d+\s+"
-        r"ROC AUC Validation Score for \d+_\d+: [\d\.]+\s+"
-        r"ROC AUC Test Score for \d+_\d+: ([\d\.]+)\s+"
-        r"Number of different base models in the ensemble: (\d+)\s+"
-        r"Models used: \[([^\]]+)\]"
-    )
-    data_pattern = re.compile(pattern, re.DOTALL)
-    matches = data_pattern.findall(data)
-    for match in matches:
-        models_used = match[4].replace("'", "").replace('"', "").strip().split(", ")
-        ensemble_data.append(
-            {
-                "method": match[0],
-                "task": match[1],
-                "roc_auc": float(match[2]),
-                "n_base_models": int(match[3]),
-                "models_used": models_used,
-            }
-        )
-
-    # Check if n_tasks is correct
-    assert len(ensemble_data) == n_tasks * 5  # w/o single best model
-
-    return ensemble_data, n_errors, n_tasks
-
-
 def parse_df_filename(filename):
     match = re.match(r"^(.+?)_(\d+)_(\d+)\.json$", filename)
     if match:
@@ -84,143 +42,46 @@ def get_inference_time(entry, repo, metrics):
     return total_inference_time
 
 
-# TODO: remove duplicate solutions
 def parse_dataframes(
     seeds: list[int], repo: EvaluationRepository
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    metrics = repo.metrics(datasets=repo.datasets(), configs=repo.configs())
     results_path = "results"
     all_dfs = []
+    print("Start data loading...")
     for seed in seeds:
-        dfs_seed = []
+        print(f"Seed: {seed}")
+        df_list_seed = []
         filepath = f"{results_path}/seed_{seed}/"
-        for file in os.listdir(filepath):
-            if file.endswith(".json"):
-                df = pd.read_json(filepath + file)
-                method_name, task_id, fold_number = parse_df_filename(file)
-                df["method"] = method_name
-                df["task"] = f"{task_id}_{fold_number}"
-                df["task_id"] = task_id
-                df["seed"] = seed
-                if method_name == "GES":  # Post processing due to wrong output
-                    df["name"] = df.apply(
-                        lambda row: f"{method_name}_{row['iteration']}", axis=1
-                    )
-                dfs_seed.append(df)
+        files = [f for f in os.listdir(filepath) if f.endswith(".json")]
+        for file in files:
+            df = pd.read_json(filepath + file)
+            method_name, task_id, fold_number = parse_df_filename(file)
+            df["task"] = f"{task_id}_{fold_number}"
+            df["method"] = method_name
+            df["task_id"] = task_id
+            df["fold"] = fold_number
+            df["seed"] = seed
+            if method_name == "GES":
+                df["name"] = df["iteration"].apply(lambda x: f"{method_name}_{x}")
+            df_list_seed.append(df)
 
-        all_dfs.extend(dfs_seed)
-
-    # Concatenate all DataFrames from all seeds
-    df = pd.concat(all_dfs)
-    print(f"df shape: {df.shape}")
-
-    # Remove duplicate solutions if models_used are identical for task, method and seed
-    df["models_used"] = df["models_used"].apply(tuple)  # Make models_used hashable
-    df = df.drop_duplicates(
-        subset=["task", "seed", "method", "models_used"], keep="first"
-    )
-
-    # Remove entries where the number of models used is one or less
-    # df = df[df["models_used"].apply(len) > 1]
-    print(f"df (unique) shape: {df.shape}")
-
-    # Inference times
-    models_used = df["models_used"].explode().unique().tolist()
-    datasets = [repo.task_to_dataset(task) for task in df["task"].unique()]
-    metrics = repo.metrics(datasets=datasets, configs=models_used)
-    df["inference_time"] = df.apply(get_inference_time, axis=1, args=(repo, metrics))
-
-    # Group by folds first and aggregate
-    fold_aggregation_functions = {
-        "name": "first",
-        "roc_auc_val": "mean",
-        "roc_auc_test": "mean",
-        "meta": "first",
-        "task_id": "first",
-        "method": "first",
-        "inference_time": "mean",
-    }
-
-    df_grouped_by_fold = (
-        df.groupby(["name", "task_id", "method", "seed"])
-        .agg(fold_aggregation_functions)
-        .reset_index(drop=True)
-    )
-
-    # Now group by seeds and aggregate
-    seed_aggregation_functions = {
-        "name": "first",
-        "roc_auc_val": "mean",
-        "roc_auc_test": "mean",
-        "meta": "first",
-        "task_id": "first",
-        "method": "first",
-        "inference_time": "mean",
-    }
-
-    df_grouped_by_seed = (
-        df_grouped_by_fold.groupby(["name", "task_id", "method"])
-        .agg(seed_aggregation_functions)
-        .reset_index(drop=True)
-    )
-
-    # Check for duplicates
-    duplicates = df_grouped_by_seed[
-        df_grouped_by_seed.duplicated(subset=["name", "task_id"], keep=False)
-    ]
-    if not duplicates.empty:
-        print("Found duplicates:")
-        print(duplicates)
-
-    return df_grouped_by_seed, metrics
-
-
-def parse_single_best(repo) -> pd.DataFrame:
-    with open("data/single_best_out2.txt", "r") as f:
-        data = f.read()
-
-    data_pattern = re.compile(
-        r"Best Model (\w+) ROC AUC Test Score for (\d+_\d+): ([\d\.]+)\n"
-        r"Best Model \w+ ROC AUC Validation Score for \d+_\d+: ([\d\.]+)"
-    )
-    matches = data_pattern.findall(data)
-
-    # Prepare data for DataFrame
-    df_records = []
-    model_names = set(match[0] for match in matches)  # Collect unique model names
-    task_ids = set(match[1] for match in matches)  # Collect unique task IDs
-
-    # Retrieve metrics based on tasks and models
-    datasets = [repo.task_to_dataset(task.split("_")[0]) for task in task_ids]
-    metrics = repo.metrics(datasets=datasets, configs=list(model_names))
-
-    for match in matches:
-        task_id, fold = match[1].split("_")
-        name = match[0]
-        roc_auc_test = float(match[2])
-        roc_auc_val = float(match[3])
-
-        # Calculate inference time for the single best model
-        dataset = repo.task_to_dataset(task_id)
-        if (dataset, int(fold), name) in metrics.index:
-            selected_metrics = metrics.loc[(dataset, int(fold), name)]
-            inference_time = selected_metrics["time_infer_s"].sum()
-        else:
-            inference_time = 0  # Default to 0 if no metrics available
-
-        df_records.append(
-            {
-                "name": name,
-                "roc_auc_val": roc_auc_val,
-                "roc_auc_test": roc_auc_test,
-                "meta": 1,
-                "task_id": task_id,
-                "method": "SINGLE_BEST",
-                "inference_time": inference_time,
-            }
+        df_seed = pd.concat(df_list_seed)
+        df_seed["models_used"] = df_seed["models_used"].apply(tuple)
+        df_seed["inference_time"] = df_seed.apply(
+            get_inference_time, axis=1, args=(repo, metrics)
         )
+        all_dfs.append(df_seed)
 
-    single_best_df = pd.DataFrame(df_records)
-    return single_best_df
+    df = pd.concat(all_dfs)
+    df.drop(columns=["task", "iteration", "weights", "models_used", "dataset", "meta"])
+
+    print(f"df shape: {df.shape}")
+    print(df.columns)
+    print(df.groupby("method").agg("mean")["roc_auc_val"])
+    print(df.groupby("method").agg("mean")["roc_auc_test"])
+
+    return df
 
 
 def normalize_data(data, high_is_better=True):
@@ -242,21 +103,30 @@ def normalize_data(data, high_is_better=True):
     return normalized_data
 
 
-def normalize_per_task_and_method(df):
-    # Apply normalization based on 'method' and 'task_id'
+def normalize_per_task_method_and_seed(df):
+    # Apply normalization based on 'method', 'task', and 'seed'
     for method_name in df["method"].unique():
-        for task_id in df[df["method"] == method_name]["task_id"].unique():
-            mask = (df["method"] == method_name) & (df["task_id"] == task_id)
-            df.loc[mask, "normalized_roc_auc"] = normalize_data(
-                -df.loc[mask, "roc_auc_test"], high_is_better=False
-            )
-            df.loc[mask, "normalized_time"] = normalize_data(
-                df.loc[mask, "inference_time"], high_is_better=False
-            )
+        for task in df[df["method"] == method_name]["task"].unique():
+            for seed in df[(df["method"] == method_name) & (df["task"] == task)][
+                "seed"
+            ].unique():
+                mask = (
+                    (df["method"] == method_name)
+                    & (df["task"] == task)
+                    & (df["seed"] == seed)
+                )
+                df.loc[mask, "normalized_roc_auc"] = normalize_data(
+                    -df.loc[mask, "roc_auc_test"], high_is_better=False
+                )
+                df.loc[mask, "normalized_time"] = normalize_data(
+                    df.loc[mask, "inference_time"], high_is_better=False
+                )
     return df
 
 
-def boxplot(df: pd.DataFrame, y_str: str, log_y_scale: bool = False):
+def boxplot(
+    df: pd.DataFrame, y_str: str, log_y_scale: bool = False, flip_y_axis: bool = False
+):
     if y_str not in df.columns:
         raise ValueError(f"Column '{y_str}' not found in DataFrame")
 
@@ -267,6 +137,8 @@ def boxplot(df: pd.DataFrame, y_str: str, log_y_scale: bool = False):
     plt.ylabel(y_str)
     if log_y_scale:
         plt.yscale("log")
+    if flip_y_axis:
+        plt.gca().invert_yaxis()
     plt.xlabel("Ensemble Method")
     plt.xticks(rotation=45)
     plt.grid(True)
@@ -285,55 +157,50 @@ def is_pareto_efficient(costs, return_mask=True):
     return is_efficient if return_mask else costs[is_efficient]
 
 
-def plot_pareto_front(df, method_name):
+def calculate_average_hypervolumes(df, method_name):
     df_method = df[df["method"] == method_name]
     hypervolumes = {}
 
-    plot_dir = "plots/pareto_fronts/"
-    os.makedirs(plot_dir, exist_ok=True)
-
+    # Iterate over unique task_ids
     for task_id in df_method["task_id"].unique():
-        df_task = df_method[df_method["task_id"] == task_id]
+        seed_hypervolumes = []  # Store hypervolumes for each seed
 
-        plt.figure()
-        plt.scatter(
-            df_task["normalized_roc_auc"],
-            df_task["normalized_time"],
-            c="gray",
-            alpha=0.5,
-            label="All Solutions",
-        )
+        for seed in df_method["seed"].unique():
+            fold_hypervolumes = []  # Store hypervolumes for each fold under the current seed
 
-        objectives = np.array(
-            [df_task["normalized_roc_auc"].values, df_task["normalized_time"].values]
-        ).T
+            for fold in df_method["fold"].unique():
+                df_fold = df_method[
+                    (df_method["task_id"] == task_id)
+                    & (df_method["seed"] == seed)
+                    & (df_method["fold"] == fold)
+                ]
 
-        is_efficient = is_pareto_efficient(objectives)
-        non_dominated = df_task.iloc[is_efficient]
+                objectives = np.array(
+                    [
+                        df_fold["normalized_roc_auc"].values,
+                        df_fold["normalized_time"].values,
+                    ]
+                ).T
+                is_efficient = is_pareto_efficient(objectives)
+                efficient_objectives = objectives[is_efficient]
 
-        plt.scatter(
-            non_dominated["normalized_roc_auc"],
-            non_dominated["normalized_time"],
-            c="blue",
-            label="Pareto Front",
-        )
-        plt.title(f"Pareto Front for {task_id} using Normalized Scores")
-        plt.xlabel("Normalized Negated ROC AUC Test")
-        plt.ylabel("Normalized Inference Time")
-        plt.legend()
-        plt.grid(True)
+                ref_point = [
+                    1,
+                    1,
+                ]  # Reference point beyond the worst values of objectives
+                hv = pg.hypervolume(efficient_objectives)
+                hypervolume = hv.compute(ref_point)
+                fold_hypervolumes.append(hypervolume)
 
-        plt.tight_layout()
-        plt.savefig(f"{plot_dir}{task_id}_{method_name}_pareto_front.png")
-        plt.close()
+            # Average hypervolumes across all folds for a given seed
+            if fold_hypervolumes:
+                average_fold_hypervolume = np.mean(fold_hypervolumes)
+                seed_hypervolumes.append(average_fold_hypervolume)
 
-        ref_point = [
-            1,  # reference point beyond the worst values of objectives for normalized scores
-            1,
-        ]
-        hv = pg.hypervolume(objectives[is_efficient])
-        hypervolume = hv.compute(ref_point)
-        hypervolumes[task_id] = hypervolume
+        # Average the averaged fold hypervolumes across seeds
+        if seed_hypervolumes:
+            average_seed_hypervolume = np.mean(seed_hypervolumes)
+            hypervolumes[task_id] = average_seed_hypervolume
 
     return hypervolumes
 
@@ -519,6 +386,7 @@ def cd_evaluation(
     hypervolumes,
     maximize_metric=True,
     plt_title="Critical Difference Plot",
+    filename="CriticalDifferencePlot.png",
 ):
     """
     hypervolumes: DataFrame with method names as columns and tasks as rows, each cell contains hypervolume.
@@ -538,33 +406,34 @@ def cd_evaluation(
     plt.title(plt_title)
     plt.tight_layout()
 
-    plt.savefig("critical_difference.png", bbox_inches="tight", dpi=300)
+    plt.savefig(filename, bbox_inches="tight", dpi=300)
     plt.close()
 
     return result
 
 
 if __name__ == "__main__":
-    reload = True
+    reload = False
     if reload:
         repo = load_repository("D244_F3_C1530_100", cache=True)
-        df = parse_dataframes([0, 1, 2], repo=repo)
-        single_best_df = parse_single_best(repo)
-        df = pd.concat([df, single_best_df], ignore_index=True)
-
+        df = parse_dataframes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], repo=repo)
+        print(df["method"].unique())
         df.reset_index(drop=True, inplace=True)
         df.to_json("data/full.json")
     else:
+        print("Loading data. This might take a while...")
         df = pd.read_json("data/full.json")
-        normalize_per_task_and_method(df)
+        normalize_per_task_method_and_seed(df)
         print(df.head())
-        print(df.shape)
+        print(df.columns)
+        print(df["method"].unique())
 
+        # Hypervolume
         methods = ["GES", "QO", "QDO", "ENS_SIZE_QDO", "INFER_TIME_QDO"]
         all_hypervolumes = {}
 
         for method in methods:
-            all_hypervolumes[method] = plot_pareto_front(df, method)
+            all_hypervolumes[method] = calculate_average_hypervolumes(df, method)
 
         print("Plotting hypervolumes...")
         plot_hypervolumes(all_hypervolumes)
@@ -589,12 +458,35 @@ if __name__ == "__main__":
         )
 
         # Now you can use the modified cd_evaluation function
-        result = cd_evaluation(pivot_hypervolumes, maximize_metric=True)
+        result = cd_evaluation(
+            pivot_hypervolumes, maximize_metric=True, plt_title="Hypervolume Critical Difference Plot" , filename="CDPHypervolumes.png"
+        )
         print(df.columns)
+        
+        # DF with the best solution per task_id, fold, seed and method
+        print("Picking best solutions...")
+        best_val_scores = df.loc[df.groupby(['task_id', 'method', 'fold', 'seed'])['roc_auc_val'].idxmax()]
+        print("Averaging over folds...")
+        avg_over_folds = best_val_scores.groupby(['task_id', 'method', 'seed']).agg({
+            'roc_auc_val': 'mean',
+            'roc_auc_test': 'mean',
+            'inference_time': 'mean'
+        }).reset_index()
+        print("Averaging over seeds...")
+        avg_over_seeds = avg_over_folds.groupby(['task_id', 'method']).agg({
+            'roc_auc_val': 'mean',
+            'roc_auc_test': 'mean',
+            'inference_time': 'mean'
+        }).reset_index()
 
         # Plot boxplot for inference time and performance
-        df["normalized_roc_auc"] = 1 - df["normalized_roc_auc"]
-        boxplot(df, "normalized_time")
-        boxplot(df, "normalized_roc_auc")
+        print(f"Shape after averaging: {avg_over_seeds.shape}")
+        boxplot(avg_over_seeds, "inference_time", log_y_scale=True)
+
+        # Rank data within each task based on 'roc_auc_test' and add as a new column
+        avg_over_seeds['rank'] = avg_over_seeds.groupby('task_id')['roc_auc_test'].rank("dense", ascending=False)
+        boxplot(avg_over_seeds, "rank", flip_y_axis=True)
+        pivot_ranks = avg_over_seeds.pivot(index="task_id", columns="method", values='rank')
+        cd_evaluation(pivot_ranks, maximize_metric=False, plt_title="Rankings Critical Difference Plot" , filename="CDPRankings.png")
 
     # main()
