@@ -11,6 +11,14 @@ from autorank import autorank, plot_stats
 from tabrepo import load_repository, EvaluationRepository
 import os
 
+method_id_name_dict = {
+    "GES": "GES",
+    "QO": "QO-ES",
+    "QDO": "QDO-ES",
+    "ENS_SIZE_QDO": "Size-QDO-ES",
+    "INFER_TIME_QDO": "Infer-QDO-ES",
+}
+
 
 def parse_df_filename(filename):
     match = re.match(r"^(.+?)_(\d+)_(\d+)\.json$", filename)
@@ -125,27 +133,65 @@ def normalize_per_task_method_and_seed(df):
 
 
 def boxplot(
-    df: pd.DataFrame, y_str: str, log_y_scale: bool = False, flip_y_axis: bool = False
+    df: pd.DataFrame,
+    y_str: str,
+    log_y_scale: bool = False,
+    log_x_scale: bool = False,
+    flip_y_axis: bool = False,
+    flip_x_axis: bool = False,
+    orient: str = "v",
+    rotation_x_ticks: int = 45,
 ):
     if y_str not in df.columns:
         raise ValueError(f"Column '{y_str}' not found in DataFrame")
 
     # Plot ROC AUC scores for each method
-    plt.figure(figsize=(14, 7))
-    sns.boxplot(x="method", y=y_str, data=df, palette="pastel", linewidth=2)
-    plt.title("Performance of Ensemble Methods: " + y_str)
-    plt.ylabel(y_str)
+    plt.figure(figsize=(8, 6))
+    if orient == "v":
+        sns.boxplot(
+            x="method_name",
+            y=y_str,
+            data=df,
+            palette="pastel",
+            linewidth=2,
+            orient=orient,
+        )
+    elif orient == "h":
+        sns.boxplot(
+            x=y_str,
+            y="method_name",
+            data=df,
+            palette="pastel",
+            linewidth=2,
+            orient=orient,
+        )
+    else:
+        raise ValueError(f"Orient '{orient}' not supported")
+    # plt.title("Performance of Ensemble Methods: " + y_str, fontsize=20)
+
+    if orient == "v":
+        plt.ylabel(y_str)
+        plt.xlabel("Ensemble Method")
+    elif orient == "h":
+        plt.xlabel(y_str)
+        plt.ylabel("Ensemble Method")
+
     if log_y_scale:
         plt.yscale("log")
+    if log_x_scale:
+        plt.xscale("log")
     if flip_y_axis:
         plt.gca().invert_yaxis()
-    plt.xlabel("Ensemble Method")
-    plt.xticks(rotation=45)
+    if flip_y_axis:
+        plt.gca().invert_yaxis()
+    plt.xticks(rotation=rotation_x_ticks)
     plt.grid(True)
     plt.tight_layout()
 
     # save to file
-    plt.savefig("plots/boxplot_" + y_str + ".png", dpi=300)
+    plt.savefig("plots/boxplot_" + y_str + ".png", dpi=300, bbox_inches="tight")
+    plt.savefig("plots/boxplot_" + y_str + ".svg", dpi=300, bbox_inches="tight")
+    plt.savefig("plots/boxplot_" + y_str + ".pdf", dpi=300, bbox_inches="tight")
 
 
 def is_pareto_efficient(costs, return_mask=True):
@@ -158,7 +204,7 @@ def is_pareto_efficient(costs, return_mask=True):
 
 
 def calculate_average_hypervolumes(df, method_name):
-    df_method = df[df["method"] == method_name]
+    df_method = df[df["method_name"] == method_name]
     hypervolumes = {}
 
     # Iterate over unique task_ids
@@ -231,17 +277,17 @@ def plot_hypervolumes(all_hypervolumes):
     sns.set(
         style="whitegrid"
     )  # Set the background to a white grid for better visibility
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(8, 6))
 
     # Use seaborn's boxplot to plot the DataFrame and create an axis object
     ax = sns.boxplot(
-        x="Method", y="Hypervolume", data=df, palette="Set2"
+        y="Method", x="Hypervolume", data=df, palette="Set2", orient="h"
     )  # You can choose a palette that fits your taste
 
     # Set titles and labels using the axis object
-    ax.set_title("Comparison of Hypervolume by Method", fontsize=16, fontweight="bold")
-    ax.set_xlabel("Method", fontsize=14)
-    ax.set_ylabel("Hypervolume", fontsize=14)
+    # ax.set_title("Comparison of Hypervolume by Method", fontsize=20, fontweight="bold")
+    ax.set_ylabel("Method", fontsize=16)
+    ax.set_xlabel("Hypervolume", fontsize=16)
 
     # Set font size for ticks directly on the axes
     ax.tick_params(
@@ -251,7 +297,10 @@ def plot_hypervolumes(all_hypervolumes):
 
     plt.tight_layout()  # Adjust the plot to fit into the figure area nicely
     plt.savefig(
-        "hypervolume_comparison.png", dpi=300
+        "hypervolume_comparison.pdf", dpi=300
+    )  # Save the figure with high resolution
+    plt.savefig(
+        "hypervolume_comparison.pdf", dpi=300
     )  # Save the figure with high resolution
     plt.close()
 
@@ -401,16 +450,18 @@ def cd_evaluation(
     result = autorank(rank_data, alpha=0.05, verbose=False, order="ascending")
 
     # Plot
-    fig, ax = plt.subplots(figsize=(12, 8))
+    fig, ax = plt.subplots(figsize=(8, 6))
     plot_stats(result, ax=ax)
-    plt.title(plt_title)
+    # plt.title(plt_title)
+    ax.tick_params(axis="both", labelsize=20)  # Set font size for axis ticks
+    labels = [item.get_text() for item in ax.get_xticklabels()]
+    ax.set_xticklabels(labels, fontsize=20)  # Adjust fontsize as needed
     plt.tight_layout()
 
     plt.savefig(filename, bbox_inches="tight", dpi=300)
     plt.close()
 
     return result
-
 
 if __name__ == "__main__":
     reload = False
@@ -423,26 +474,27 @@ if __name__ == "__main__":
     else:
         print("Loading data. This might take a while...")
         df = pd.read_json("data/full.json")
+        # Map method IDs to names
+        if "method" in df.columns:
+            df["method_name"] = df["method"].map(method_id_name_dict)
+        else:
+            raise ValueError("Column 'method' not found in DataFrame")
         normalize_per_task_method_and_seed(df)
         print(df.head())
         print(df.columns)
         print(df["method"].unique())
 
-        # Hypervolume
-        methods = ["GES", "QO", "QDO", "ENS_SIZE_QDO", "INFER_TIME_QDO"]
+        # Hypervolume #TODO: fix names
+        methods = ["GES", "QO-ES", "QDO-ES", "Size-QDO-ES", "Infer-QDO-ES"]
         all_hypervolumes = {}
 
         for method in methods:
             all_hypervolumes[method] = calculate_average_hypervolumes(df, method)
+        print(all_hypervolumes)
 
         print("Plotting hypervolumes...")
         plot_hypervolumes(all_hypervolumes)
-
-        # Create a DataFrame for all hypervolumes
         hypervolumes_df = pd.DataFrame(all_hypervolumes)
-
-        # Save the DataFrame as a CSV file
-        print("Saving hypervolume csv...")
         hypervolumes_df.to_csv("hypervolumes.csv", index=False)
 
         data = []
@@ -456,37 +508,87 @@ if __name__ == "__main__":
         pivot_hypervolumes = df_hypervolumes.pivot(
             index="Task", columns="Method", values="Hypervolume"
         )
+        print(pivot_hypervolumes.head())
+        print(pivot_hypervolumes.columns)
+        print(pivot_hypervolumes.shape)
 
         # Now you can use the modified cd_evaluation function
         result = cd_evaluation(
-            pivot_hypervolumes, maximize_metric=True, plt_title="Hypervolume Critical Difference Plot" , filename="CDPHypervolumes.png"
+            pivot_hypervolumes,
+            maximize_metric=True,
+            plt_title="Hypervolume Critical Difference Plot",
+            filename="CDPHypervolumes.pdf",
+        )
+        result = cd_evaluation(
+            pivot_hypervolumes,
+            maximize_metric=True,
+            plt_title="Hypervolume Critical Difference Plot",
+            filename="CDPHypervolumes.svg",
         )
         print(df.columns)
-        
+
         # DF with the best solution per task_id, fold, seed and method
         print("Picking best solutions...")
-        best_val_scores = df.loc[df.groupby(['task_id', 'method', 'fold', 'seed'])['roc_auc_val'].idxmax()]
+        best_val_scores = df.loc[
+            df.groupby(["task_id", "method_name", "fold", "seed"])[
+                "roc_auc_val"
+            ].idxmax()
+        ]
         print("Averaging over folds...")
-        avg_over_folds = best_val_scores.groupby(['task_id', 'method', 'seed']).agg({
-            'roc_auc_val': 'mean',
-            'roc_auc_test': 'mean',
-            'inference_time': 'mean'
-        }).reset_index()
+        avg_over_folds = (
+            best_val_scores.groupby(["task_id", "method_name", "seed"])
+            .agg(
+                {
+                    "roc_auc_val": "mean",
+                    "roc_auc_test": "mean",
+                    "inference_time": "mean",
+                }
+            )
+            .reset_index()
+        )
         print("Averaging over seeds...")
-        avg_over_seeds = avg_over_folds.groupby(['task_id', 'method']).agg({
-            'roc_auc_val': 'mean',
-            'roc_auc_test': 'mean',
-            'inference_time': 'mean'
-        }).reset_index()
+        avg_over_seeds = (
+            avg_over_folds.groupby(["task_id", "method_name"])
+            .agg(
+                {
+                    "roc_auc_val": "mean",
+                    "roc_auc_test": "mean",
+                    "inference_time": "mean",
+                }
+            )
+            .reset_index()
+        )
 
         # Plot boxplot for inference time and performance
         print(f"Shape after averaging: {avg_over_seeds.shape}")
-        boxplot(avg_over_seeds, "inference_time", log_y_scale=True)
+        boxplot(
+            avg_over_seeds,
+            "inference_time",
+            log_x_scale=True,
+            orient="h",
+            rotation_x_ticks=0,
+        )
 
         # Rank data within each task based on 'roc_auc_test' and add as a new column
-        avg_over_seeds['rank'] = avg_over_seeds.groupby('task_id')['roc_auc_test'].rank("dense", ascending=False)
+        avg_over_seeds["rank"] = avg_over_seeds.groupby("task_id")["roc_auc_test"].rank(
+            "dense", ascending=False
+        )
         boxplot(avg_over_seeds, "rank", flip_y_axis=True)
-        pivot_ranks = avg_over_seeds.pivot(index="task_id", columns="method", values='rank')
-        cd_evaluation(pivot_ranks, maximize_metric=False, plt_title="Rankings Critical Difference Plot" , filename="CDPRankings.png")
+        avg_over_seeds["negated_roc_auc_test"] = 1 - avg_over_seeds["roc_auc_test"]
+        pivot_ranks = avg_over_seeds.pivot(
+            index="task_id", columns="method_name", values="negated_roc_auc_test"
+        )
+        cd_evaluation(
+            pivot_ranks,
+            maximize_metric=False,
+            plt_title="Rankings Critical Difference Plot",
+            filename="CDPRankings.pdf",
+        )
+        cd_evaluation(
+            pivot_ranks,
+            maximize_metric=False,
+            plt_title="Rankings Critical Difference Plot",
+            filename="CDPRankings.svg",
+        )
 
     # main()
