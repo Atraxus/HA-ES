@@ -286,14 +286,14 @@ def plot_hypervolumes(all_hypervolumes):
 
     # Set titles and labels using the axis object
     # ax.set_title("Comparison of Hypervolume by Method", fontsize=20, fontweight="bold")
-    ax.set_ylabel("Method", fontsize=16)
-    ax.set_xlabel("Hypervolume", fontsize=16)
+    ax.set_ylabel("Method", fontsize=20)
+    ax.set_xlabel("Hypervolume", fontsize=20)
 
     # Set font size for ticks directly on the axes
     ax.tick_params(
-        axis="x", labelrotation=45, labelsize=12
+        axis="x", labelrotation=45, labelsize=16
     )  # Rotate x-ticks to avoid overlap
-    ax.tick_params(axis="y", labelsize=12)
+    ax.tick_params(axis="y", labelsize=16)
 
     plt.tight_layout()  # Adjust the plot to fit into the figure area nicely
     plt.savefig(
@@ -449,10 +449,13 @@ def cd_evaluation(
     # Run autorank
     result = autorank(rank_data, alpha=0.05, verbose=False, order="ascending")
 
-    # Plot
-    fig, ax = plt.subplots(figsize=(8, 6))
+    # Plot with updated font size
+    plt.close("all")
+    width = 6
+    fig, ax = plt.subplots(figsize=(12, width))
+    plt.rcParams.update({"font.size": 20})
+
     plot_stats(result, ax=ax)
-    # plt.title(plt_title)
     ax.tick_params(axis="both", labelsize=20)  # Set font size for axis ticks
     labels = [item.get_text() for item in ax.get_xticklabels()]
     ax.set_xticklabels(labels, fontsize=20)  # Adjust fontsize as needed
@@ -462,6 +465,63 @@ def cd_evaluation(
     plt.close()
 
     return result
+
+def create_latex_table(df, repo, filename='table.tex', max_char=15):
+    import numpy as np
+
+    methods = df['method_name'].unique()
+    task_ids = df['task_id'].unique()
+    
+    with open(filename, 'w') as f:
+        f.write("\\begin{longtable}{l" + "c" * len(methods) + "}\n")
+        f.write("\\caption{Test ROC AUC - Binary: The mean and standard deviation of the test score over all folds for each method. The best methods per dataset are shown in bold. All methods close to the best method are considered best (using NumPy’s default \\texttt{isclose} function).}\n")
+        f.write("\\label{tab:results} \\\\ \n")
+        f.write("\\toprule\n")
+        f.write("Dataset & " + " & ".join(map(str, methods)) + " \\\\\n")
+        f.write("\\midrule\n")
+        f.write("\\endfirsthead\n")
+        f.write("\\toprule\n")
+        f.write("Dataset & " + " & ".join(map(str, methods)) + " \\\\\n")
+        f.write("\\midrule\n")
+        f.write("\\endhead\n")
+        f.write("\\midrule\n")
+        f.write("\\multicolumn{" + str(len(methods) + 1) + "}{r}{Continued on next page} \\\\\n")
+        f.write("\\midrule\n")
+        f.write("\\endfoot\n")
+        f.write("\\bottomrule\n")
+        f.write("\\endlastfoot\n")
+        
+        for task_id in task_ids:
+            dataset_name = repo.tid_to_dataset(task_id)  # Convert task_id to dataset name
+            truncated_name = (dataset_name[:max_char] + '...') if len(dataset_name) > max_char else dataset_name
+            escaped_name = truncated_name.replace('_', '\\_')  # Escape underscores
+            line = [str(escaped_name)]  # Ensure the first item is a string
+            method_scores = []
+            
+            for method in methods:
+                method_data = df[(df['task_id'] == task_id) & (df['method_name'] == method)]
+                if not method_data.empty:
+                    mean_score = method_data['roc_auc_test'].mean()
+                    std_dev = method_data['roc_auc_test'].std()
+                    score_str = f"{mean_score:.4f}($\\pm${std_dev:.4f})"
+                    method_scores.append((mean_score, score_str))
+                else:
+                    method_scores.append((None, "-"))
+            
+            # Determine the best score
+            best_score = max(score[0] for score in method_scores if score[0] is not None)
+            
+            for mean_score, score_str in method_scores:
+                if mean_score is not None and np.isclose(mean_score, best_score):
+                    line.append(f"\\textbf{{{score_str}}}")
+                else:
+                    line.append(score_str)
+                    
+            f.write(" & ".join(line) + " \\\\\n")
+        
+        f.write("\\bottomrule\n")
+        f.write("\\end{longtable}\n")
+
 
 if __name__ == "__main__":
     reload = False
@@ -483,6 +543,10 @@ if __name__ == "__main__":
         print(df.head())
         print(df.columns)
         print(df["method"].unique())
+        context_name = "D244_F3_C1530_100"
+        repo = load_repository(context_name, cache=True)
+        # Assume avg_over_seeds DataFrame is available from your existing script
+        create_latex_table(df, repo)
 
         # Hypervolume #TODO: fix names
         methods = ["GES", "QO-ES", "QDO-ES", "Size-QDO-ES", "Infer-QDO-ES"]

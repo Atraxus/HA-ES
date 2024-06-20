@@ -37,7 +37,9 @@ print(f"Datasets: {datasets}")
 task_numbers = []
 for dataset in datasets:
     tid = repo.dataset_to_tid(dataset)
+    print(tid)
+    print(repo.tid_to_dataset(tid))
     #print(f"{dataset} tid: {tid}")
     task_numbers.append("_" + str(tid) + "_0")
     
-check_files_for_numbers("results/seed_1/", task_numbers)
+# check_files_for_numbers("results/seed_1/", task_numbers)
