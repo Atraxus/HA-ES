@@ -1,4 +1,3 @@
-from collections import Counter
 from phem.methods.ensemble_selection.qdo.behavior_space import BehaviorSpace
 from tabrepo import load_repository, EvaluationRepository, get_context
 
@@ -187,32 +186,23 @@ def evaluate_ensemble(
     for bm in ensemble.base_models:
         bm.switch_to_val_simulation()
 
-    ensemble.ensemble_fit(predictions_val, y_val)
-
     performances = []
-    if name == "GES":
-        indices_so_far = []
-        index_counts = Counter()
-        for idx in ensemble.indices_:
-            indices_so_far.append(idx)
-            index_counts.update([idx])
 
-            # Calculate weights based on occurrence of each index
-            ensemble.weights_ = np.zeros(len(ensemble.base_models))
-            for index, count in index_counts.items():
-                ensemble.weights_[index] = count / len(indices_so_far)
-
-            selected_indices = list(index_counts.keys())
-            y_pred_val = ensemble.ensemble_predict_proba(
-                predictions_val[selected_indices, :]
-            )
-            y_pred_test = ensemble.ensemble_predict_proba(
-                predictions_test[selected_indices, :]
-            )
+    if name == "MULTI_GES":
+        num_solutions = 15
+        infer_time_weights = np.linspace(0, 1, num=num_solutions)
+        for time_weight in infer_time_weights:
+            ensemble.time_weight = time_weight
+            ensemble.loss_weight = 1 - time_weight
+            ensemble.ensemble_fit(predictions_val, y_val)
+            print(f"\tFitting MULTI_GES for time weight {time_weight}")
+            y_pred_val = ensemble.ensemble_predict_proba(predictions_val)
+            y_pred_test = ensemble.ensemble_predict_proba(predictions_test)
             if number_of_classes == 2:
                 y_pred_val = y_pred_val[:, 1]
                 y_pred_test = y_pred_test[:, 1]
 
+            y_test = repo.labels_test(dataset=dataset, fold=fold)
             roc_auc_val = roc_auc_score(
                 y_val, y_pred_val, multi_class="ovr", average="macro"
             )
@@ -221,18 +211,43 @@ def evaluate_ensemble(
             )
 
             perf_dict = {
-                "name": "GES_" + len(indices_so_far),
-                "iteration": len(indices_so_far),
+                "name": "MULTI_GES_" + "{:.2f}".format(time_weight),
+                "time_weight": time_weight,
                 "roc_auc_val": roc_auc_val,
                 "roc_auc_test": roc_auc_test,
                 "models_used": [
-                    ensemble.base_models[i].name for i in set(indices_so_far)
+                    ensemble.base_models[i].name for i in set(ensemble.indices_)
                 ],
-                "weights": [1 / len(indices_so_far)]
-                * len(set(indices_so_far)),  # Uniform weights as example
+                "weights": [ensemble.weights_[i] for i in set(ensemble.indices_)],
             }
             performances.append(perf_dict)
+    elif name == "GES":
+        ensemble.ensemble_fit(predictions_val, y_val)
+        y_pred_val = ensemble.ensemble_predict_proba(predictions_val)
+        y_pred_test = ensemble.ensemble_predict_proba(predictions_test)
+        if number_of_classes == 2:
+            y_pred_val = y_pred_val[:, 1]
+            y_pred_test = y_pred_test[:, 1]
+
+        y_test = repo.labels_test(dataset=dataset, fold=fold)
+        roc_auc_val = roc_auc_score(
+            y_val, y_pred_val, multi_class="ovr", average="macro"
+        )
+        roc_auc_test = roc_auc_score(
+            y_test, y_pred_test, multi_class="ovr", average="macro"
+        )
+        perf_dict = {
+            "name": name,
+            "roc_auc_val": roc_auc_val,
+            "roc_auc_test": roc_auc_test,
+            "models_used": [
+                ensemble.base_models[i].name for i in set(ensemble.indices_)
+            ],
+            "weights": [ensemble.weights_[i] for i in set(ensemble.indices_)],
+        }
+        performances.append(perf_dict)
     elif type(ensemble) == QDOEnsembleSelection:
+        ensemble.ensemble_fit(predictions_val, y_val)
         solutions = [np.array(e.sol) for e in ensemble.archive]
         unique_tuples = set(tuple(array) for array in solutions)
         unique_solutions = [np.array(t) for t in unique_tuples]
@@ -301,6 +316,10 @@ def load_and_process_base_models(
     dataset = repo.task_to_dataset(task)
     fold = repo.task_to_fold(task)
 
+    dataset_fold_metrics = metrics.loc[(dataset, fold)]
+    average_time_infer = dataset_fold_metrics["time_infer_s"].mean()
+    average_time_train = dataset_fold_metrics["time_train_s"].mean()
+
     # Iterate over each config to create a base model representation
     base_models = []
     predictions_val = []
@@ -310,8 +329,9 @@ def load_and_process_base_models(
             time_infer_s = metrics.loc[(dataset, fold, config), "time_infer_s"]
             time_train_s = metrics.loc[(dataset, fold, config), "time_train_s"]
         except KeyError as e:
-            #! Not all configs have entries; is it ok to assume previous value is good enough?
-            print(f"Error accessing data: {e}")
+            print(f"Error accessing data {e}. Using average...")
+            time_infer_s = average_time_infer
+            time_train_s = average_time_train
 
         config_key = config.rsplit("_BAG_L1", 1)[
             0
@@ -372,34 +392,44 @@ def evaluate_single_best_model(
     best_model = None
     for model in ensemble:
         model.switch_to_val_simulation()  # Ensure the model returns validation predictions
-        predicted_probs = model.predict_proba(None)  # Since predictions are pre-stored, no need to pass X
-        score = roc_auc_score(y_val, predicted_probs, multi_class="ovr", average="macro")
+        predicted_probs = model.predict_proba(
+            None
+        )  # Since predictions are pre-stored, no need to pass X
+        score = roc_auc_score(
+            y_val, predicted_probs, multi_class="ovr", average="macro"
+        )
         if score > best_score:
             best_score = score
             best_model = model
 
     # Now evaluate the best model on test data
     best_model.switch_to_test_simulation()  # Switch to test predictions
-    predicted_probs_test = best_model.predict_proba(None)  # No X needed as predictions are pre-stored
-    test_score = roc_auc_score(y_test, predicted_probs_test, multi_class="ovr", average="macro")
+    predicted_probs_test = best_model.predict_proba(
+        None
+    )  # No X needed as predictions are pre-stored
+    test_score = roc_auc_score(
+        y_test, predicted_probs_test, multi_class="ovr", average="macro"
+    )
 
     # Also on validation data
     best_model.switch_to_val_simulation()
     predicted_probs_val = best_model.predict_proba(None)
-    val_score = roc_auc_score(y_val, predicted_probs_val, multi_class="ovr", average="macro")
+    val_score = roc_auc_score(
+        y_val, predicted_probs_val, multi_class="ovr", average="macro"
+    )
 
     # Creating performance dictionary and saving to DataFrame
     performance_dict = {
         "name": "SINGLE_BEST",
         "roc_auc_val": val_score,
         "roc_auc_test": test_score,
-        "task_id": task.split('_')[0],
+        "task_id": task.split("_")[0],
         "fold": fold,
         "models_used": [best_model.name],
         "weights": [1.0],
-        "method": "SINGLE_BEST"
+        "method": "SINGLE_BEST",
     }
-    
+
     performance_df = pd.DataFrame([performance_dict])  # Convert dict to DataFrame
     performance_df["dataset"] = dataset
     performance_df["method"] = "SINGLE_BEST"
@@ -408,19 +438,21 @@ def evaluate_single_best_model(
     result_path = f"results/seed_{seed}"
     if not os.path.exists(result_path):
         os.makedirs(result_path)
-        
+
     # Save DataFrame to JSON
     performance_df.to_json(f"{result_path}/SINGLE_BEST_{task}.json")
 
     # Optionally print out results for verification
     print(f"Best Model {best_model.name} ROC AUC Test Score for {task}: {test_score}")
-    print(f"Best Model {best_model.name} ROC AUC Validation Score for {task}: {val_score}")
-
+    print(
+        f"Best Model {best_model.name} ROC AUC Validation Score for {task}: {val_score}"
+    )
 
 
 def main(
     random_seed: int = 0,
     run_singleBest: bool = False,
+    run_multi_ges: bool = False,
     run_ges: bool = False,
     run_qo: bool = False,
     run_qdo: bool = False,
@@ -485,7 +517,23 @@ def main(
                 predictions_test,
                 seed=random_seed,
             )
-
+        # GES evaluation
+        if run_multi_ges:
+            ges = EnsembleSelection(
+                base_models=base_models,
+                n_iterations=100,
+                metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
+                random_state=random_seed,
+            )
+            evaluate_ensemble(
+                "MULTI_GES",
+                ges,
+                repo,
+                task,
+                predictions_val,
+                predictions_test,
+                seed=random_seed,
+            )
         # QO evaluation
         if run_qo:
             qo = QDOEnsembleSelection(
@@ -581,8 +629,9 @@ if __name__ == "__main__":
     args = parse_args()
     main(
         args.seed,
-        run_singleBest=True,
+        run_singleBest=False,
         run_ges=False,
+        run_multi_ges=True,
         run_qo=False,
         run_qdo=False,
         run_infer_time_qdo=False,
