@@ -13,6 +13,7 @@ import os
 
 method_id_name_dict = {
     "GES": "GES",
+    "MULTI_GES": "Multi-GES",
     "QO": "QO-ES",
     "QDO": "QDO-ES",
     "ENS_SIZE_QDO": "Size-QDO-ES",
@@ -50,8 +51,9 @@ def get_inference_time(entry, repo, metrics):
     return total_inference_time
 
 
+
 def parse_dataframes(
-    seeds: list[int], repo: EvaluationRepository
+    seeds: list[int], repo: EvaluationRepository, method_names: list[str]
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     metrics = repo.metrics(datasets=repo.datasets(), configs=repo.configs())
     results_path = "results"
@@ -61,7 +63,7 @@ def parse_dataframes(
         print(f"Seed: {seed}")
         df_list_seed = []
         filepath = f"{results_path}/seed_{seed}/"
-        files = [f for f in os.listdir(filepath) if f.endswith(".json")]
+        files = [f for f in os.listdir(filepath) if f.endswith('.json') and any(name in f for name in method_names)]
         for file in files:
             df = pd.read_json(filepath + file)
             method_name, task_id, fold_number = parse_df_filename(file)
@@ -79,6 +81,8 @@ def parse_dataframes(
         df_seed["inference_time"] = df_seed.apply(
             get_inference_time, axis=1, args=(repo, metrics)
         )
+        print(df_seed.head())
+        print(f"df_seed shape: {df_seed.shape}")
         all_dfs.append(df_seed)
 
     df = pd.concat(all_dfs)
@@ -86,6 +90,7 @@ def parse_dataframes(
 
     print(f"df shape: {df.shape}")
     print(df.columns)
+    print(df.head())
     print(df.groupby("method").agg("mean")["roc_auc_val"])
     print(df.groupby("method").agg("mean")["roc_auc_test"])
 
@@ -513,10 +518,10 @@ def create_latex_table(df, repo, filename='table.tex', max_char=15):
 
 
 if __name__ == "__main__":
-    reload = False
+    reload = True
     if reload:
         repo = load_repository("D244_F3_C1530_100", cache=True)
-        df = parse_dataframes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], repo=repo)
+        df = parse_dataframes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], repo=repo, method_names=["MULTI_GES"]) #["GES", "QO", "QDO", "ENS_SIZE_QDO", "INFER_TIME_QDO"])
         print(df["method"].unique())
         df.reset_index(drop=True, inplace=True)
         df.to_json("data/full.json")
