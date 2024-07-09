@@ -254,7 +254,7 @@ def evaluate_ensemble(
             )
 
             perf_dict = {
-                "name": "GES_" + len(indices_so_far),
+                "name": "GES_" + str(len(indices_so_far)),
                 "iteration": len(indices_so_far),
                 "roc_auc_val": roc_auc_val,
                 "roc_auc_test": roc_auc_test,

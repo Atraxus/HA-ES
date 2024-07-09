@@ -81,8 +81,8 @@ def parse_dataframes(
         df_seed["inference_time"] = df_seed.apply(
             get_inference_time, axis=1, args=(repo, metrics)
         )
-        print(df_seed.head())
-        print(f"df_seed shape: {df_seed.shape}")
+        #print(df_seed.head())
+        #print(f"df_seed shape: {df_seed.shape}")
         all_dfs.append(df_seed)
 
     df = pd.concat(all_dfs)
@@ -518,16 +518,18 @@ def create_latex_table(df, repo, filename='table.tex', max_char=15):
 
 
 if __name__ == "__main__":
-    reload = True
+    reload = False
     if reload:
-        repo = load_repository("D244_F3_C1530_100", cache=True)
-        df = parse_dataframes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], repo=repo, method_names=["MULTI_GES"]) #["GES", "QO", "QDO", "ENS_SIZE_QDO", "INFER_TIME_QDO"])
+        repo = load_repository("D244_F3_C1530_30", cache=True)
+        df = parse_dataframes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], repo=repo, method_names=["GES", "MULTI_GES"]) #["GES", "QO", "QDO", "ENS_SIZE_QDO", "INFER_TIME_QDO"])
         print(df["method"].unique())
         df.reset_index(drop=True, inplace=True)
         df.to_json("data/full.json")
+        print("Wrote all data to data/full.json...")
     else:
         print("Loading data. This might take a while...")
         df = pd.read_json("data/full.json")
+        
         # Map method IDs to names
         if "method" in df.columns:
             df["method_name"] = df["method"].map(method_id_name_dict)
@@ -537,13 +539,34 @@ if __name__ == "__main__":
         print(df.head())
         print(df.columns)
         print(df["method"].unique())
-        context_name = "D244_F3_C1530_100"
+        context_name = "D244_F3_C1530_30"
         repo = load_repository(context_name, cache=True)
         # Assume avg_over_seeds DataFrame is available from your existing script
         create_latex_table(df, repo)
+        
+        # Avg number of models used 
+        df['models_used_length'] = df['models_used'].apply(len)
+        boxplot(
+            df,
+            "models_used_length",
+            #log_x_scale=True,
+            orient="h",
+            rotation_x_ticks=0,
+        )
+        
+        # Avg inference time
+        boxplot(
+            df,
+            "roc_auc_test",
+            log_x_scale=True,
+            orient="h",
+            rotation_x_ticks=0,
+        )
+        
+        # TODO: Plot pareto fronts
 
         # Hypervolume
-        methods = ["GES", "QO-ES", "QDO-ES", "Size-QDO-ES", "Infer-QDO-ES"]
+        methods = ["GES", "Multi-GES"] # "QO-ES", "QDO-ES", "Size-QDO-ES", "Infer-QDO-ES"]
         all_hypervolumes = {}
 
         for method in methods:
@@ -587,11 +610,11 @@ if __name__ == "__main__":
 
         # DF with the best solution per task_id, fold, seed and method
         print("Picking best solutions...")
-        best_val_scores = df.loc[
-            df.groupby(["task_id", "method_name", "fold", "seed"])[
-                "roc_auc_val"
-            ].idxmax()
-        ]
+        idx = df.groupby(['method_name', 'task_id', 'fold', 'seed'])['roc_auc_val'].idxmax()
+
+        # Use these indices to get the rows with the maximum 'roc_auc_val' for each group
+        best_val_scores = df.loc[idx]
+        
         print("Averaging over folds...")
         avg_over_folds = (
             best_val_scores.groupby(["task_id", "method_name", "seed"])
@@ -612,6 +635,7 @@ if __name__ == "__main__":
                     "roc_auc_val": "mean",
                     "roc_auc_test": "mean",
                     "inference_time": "mean",
+                    "name": "first"
                 }
             )
             .reset_index()
