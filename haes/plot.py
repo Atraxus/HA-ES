@@ -51,7 +51,6 @@ def get_inference_time(entry, repo, metrics):
     return total_inference_time
 
 
-
 def parse_dataframes(
     seeds: list[int], repo: EvaluationRepository, method_names: list[str]
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -63,7 +62,11 @@ def parse_dataframes(
         print(f"Seed: {seed}")
         df_list_seed = []
         filepath = f"{results_path}/seed_{seed}/"
-        files = [f for f in os.listdir(filepath) if f.endswith('.json') and any(name in f for name in method_names)]
+        files = [
+            f
+            for f in os.listdir(filepath)
+            if f.endswith(".json") and any(name in f for name in method_names)
+        ]
         for file in files:
             df = pd.read_json(filepath + file)
             method_name, task_id, fold_number = parse_df_filename(file)
@@ -81,8 +84,10 @@ def parse_dataframes(
         df_seed["inference_time"] = df_seed.apply(
             get_inference_time, axis=1, args=(repo, metrics)
         )
-        #print(df_seed.head())
-        #print(f"df_seed shape: {df_seed.shape}")
+        
+        
+        # After calculating inference times, convert 'models_used' back to lists:
+        df_seed["models_used"] = df_seed["models_used"].apply(list)
         all_dfs.append(df_seed)
 
     df = pd.concat(all_dfs)
@@ -460,15 +465,18 @@ def cd_evaluation(
 
     return result
 
-def create_latex_table(df, repo, filename='table.tex', max_char=15):
+
+def create_latex_table(df, repo, filename="table.tex", max_char=15):
     import numpy as np
 
-    methods = df['method_name'].unique()
-    task_ids = df['task_id'].unique()
-    
-    with open(filename, 'w') as f:
+    methods = df["method_name"].unique()
+    task_ids = df["task_id"].unique()
+
+    with open(filename, "w") as f:
         f.write("\\begin{longtable}{l" + "c" * len(methods) + "}\n")
-        f.write("\\caption{Test ROC AUC - Binary: The mean and standard deviation of the test score over all folds for each method. The best methods per dataset are shown in bold. All methods close to the best method are considered best (using NumPy’s default \\texttt{isclose} function).}\n")
+        f.write(
+            "\\caption{Test ROC AUC - Binary: The mean and standard deviation of the test score over all folds for each method. The best methods per dataset are shown in bold. All methods close to the best method are considered best (using NumPy’s default \\texttt{isclose} function).}\n"
+        )
         f.write("\\label{tab:results} \\\\ \n")
         f.write("\\toprule\n")
         f.write("Dataset & " + " & ".join(map(str, methods)) + " \\\\\n")
@@ -479,49 +487,110 @@ def create_latex_table(df, repo, filename='table.tex', max_char=15):
         f.write("\\midrule\n")
         f.write("\\endhead\n")
         f.write("\\midrule\n")
-        f.write("\\multicolumn{" + str(len(methods) + 1) + "}{r}{Continued on next page} \\\\\n")
+        f.write(
+            "\\multicolumn{"
+            + str(len(methods) + 1)
+            + "}{r}{Continued on next page} \\\\\n"
+        )
         f.write("\\midrule\n")
         f.write("\\endfoot\n")
         f.write("\\bottomrule\n")
         f.write("\\endlastfoot\n")
-        
+
         for task_id in task_ids:
-            dataset_name = repo.tid_to_dataset(task_id)  # Convert task_id to dataset name
-            truncated_name = (dataset_name[:max_char] + '...') if len(dataset_name) > max_char else dataset_name
-            escaped_name = truncated_name.replace('_', '\\_')  # Escape underscores
+            dataset_name = repo.tid_to_dataset(
+                task_id
+            )  # Convert task_id to dataset name
+            truncated_name = (
+                (dataset_name[:max_char] + "...")
+                if len(dataset_name) > max_char
+                else dataset_name
+            )
+            escaped_name = truncated_name.replace("_", "\\_")  # Escape underscores
             line = [str(escaped_name)]  # Ensure the first item is a string
             method_scores = []
-            
+
             for method in methods:
-                method_data = df[(df['task_id'] == task_id) & (df['method_name'] == method)]
+                method_data = df[
+                    (df["task_id"] == task_id) & (df["method_name"] == method)
+                ]
                 if not method_data.empty:
-                    mean_score = method_data['roc_auc_test'].mean()
-                    std_dev = method_data['roc_auc_test'].std()
+                    mean_score = method_data["roc_auc_test"].mean()
+                    std_dev = method_data["roc_auc_test"].std()
                     score_str = f"{mean_score:.4f}($\\pm${std_dev:.4f})"
                     method_scores.append((mean_score, score_str))
                 else:
                     method_scores.append((None, "-"))
-            
+
             # Determine the best score
-            best_score = max(score[0] for score in method_scores if score[0] is not None)
-            
+            best_score = max(
+                score[0] for score in method_scores if score[0] is not None
+            )
+
             for mean_score, score_str in method_scores:
                 if mean_score is not None and np.isclose(mean_score, best_score):
                     line.append(f"\\textbf{{{score_str}}}")
                 else:
                     line.append(score_str)
-                    
+
             f.write(" & ".join(line) + " \\\\\n")
-        
+
         f.write("\\bottomrule\n")
         f.write("\\end{longtable}\n")
+
+
+def plot_task_scatterplots(df, directory=""):
+    """
+    Plots and saves scatterplots for each task from the DataFrame, combining all methods per task.
+
+    Parameters:
+    - df (DataFrame): Pandas DataFrame containing the columns 'task', 'method_name', 'normalized_roc_auc',
+      'normalized_time', and 'name'.
+    - directory (str, optional): Directory to save the plots to. Default is the current directory.
+
+    Each plot is saved as 'scatter_plot_{task}.png' and plots the normalized ROC AUC against
+    normalized computation time for all methods in that task, with each method differently colored.
+    """
+    sns.set(style="whitegrid")  # Set the style of the plots with seaborn
+
+    # Create directory if it does not exist
+    if directory and not os.path.exists(directory):
+        os.makedirs(directory)
+
+    # Loop through each task
+    for task, group in df.groupby("task"):
+        plt.figure(figsize=(10, 6))
+        sns.scatterplot(
+            data=group,
+            x="negated_normalized_roc_auc",
+            y="normalized_time",
+            hue="method_name",
+            s=100,
+        )
+
+        # Adding titles and labels
+        plt.title(f"Scatter Plot for Task: {task}")
+        plt.xlabel("Normalized ROC AUC")
+        plt.ylabel("Normalized Time")
+        plt.legend(title="Method Name", bbox_to_anchor=(1.05, 1), loc="upper left")
+
+        # Constructing file path
+        filename = f"scatter_plot_{task}.png"
+        if directory:
+            filename = os.path.join(directory, filename)
+
+        # Save the plot
+        plt.savefig(filename, bbox_inches="tight")
+        plt.close()  # Close the figure to free memory
 
 
 if __name__ == "__main__":
     reload = False
     if reload:
         repo = load_repository("D244_F3_C1530_30", cache=True)
-        df = parse_dataframes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], repo=repo, method_names=["GES", "MULTI_GES"]) #["GES", "QO", "QDO", "ENS_SIZE_QDO", "INFER_TIME_QDO"])
+        df = parse_dataframes(
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], repo=repo, method_names=["GES", "MULTI_GES"]
+        )  # ["GES", "QO", "QDO", "ENS_SIZE_QDO", "INFER_TIME_QDO"])
         print(df["method"].unique())
         df.reset_index(drop=True, inplace=True)
         df.to_json("data/full.json")
@@ -529,7 +598,7 @@ if __name__ == "__main__":
     else:
         print("Loading data. This might take a while...")
         df = pd.read_json("data/full.json")
-        
+
         # Map method IDs to names
         if "method" in df.columns:
             df["method_name"] = df["method"].map(method_id_name_dict)
@@ -543,30 +612,49 @@ if __name__ == "__main__":
         repo = load_repository(context_name, cache=True)
         # Assume avg_over_seeds DataFrame is available from your existing script
         create_latex_table(df, repo)
-        
-        # Avg number of models used 
-        df['models_used_length'] = df['models_used'].apply(len)
+
+        # Avg number of models used
+        df["models_used_length"] = df["models_used"].apply(len)
         boxplot(
             df,
             "models_used_length",
-            #log_x_scale=True,
+            # log_x_scale=True,
             orient="h",
             rotation_x_ticks=0,
         )
-        
+
         # Avg inference time
         boxplot(
             df,
             "roc_auc_test",
-            log_x_scale=True,
+            log_x_scale=False,
             orient="h",
             rotation_x_ticks=0,
         )
-        
-        # TODO: Plot pareto fronts
+        boxplot(
+            df,
+            "negated_normalized_roc_auc",
+            log_x_scale=False,
+            orient="h",
+            rotation_x_ticks=0,
+        )
+        boxplot(
+            df,
+            "normalized_time",
+            log_x_scale=False,
+            orient="h",
+            rotation_x_ticks=0,
+        )
+
+        df.to_csv("data/full.csv")
+        exit()
+        plot_task_scatterplots(df, directory="plots/scatter")
 
         # Hypervolume
-        methods = ["GES", "Multi-GES"] # "QO-ES", "QDO-ES", "Size-QDO-ES", "Infer-QDO-ES"]
+        methods = [
+            "GES",
+            "Multi-GES",
+        ]  # "QO-ES", "QDO-ES", "Size-QDO-ES", "Infer-QDO-ES"]
         all_hypervolumes = {}
 
         for method in methods:
@@ -610,11 +698,13 @@ if __name__ == "__main__":
 
         # DF with the best solution per task_id, fold, seed and method
         print("Picking best solutions...")
-        idx = df.groupby(['method_name', 'task_id', 'fold', 'seed'])['roc_auc_val'].idxmax()
+        idx = df.groupby(["method_name", "task_id", "fold", "seed"])[
+            "roc_auc_val"
+        ].idxmax()
 
         # Use these indices to get the rows with the maximum 'roc_auc_val' for each group
         best_val_scores = df.loc[idx]
-        
+
         print("Averaging over folds...")
         avg_over_folds = (
             best_val_scores.groupby(["task_id", "method_name", "seed"])
@@ -635,7 +725,7 @@ if __name__ == "__main__":
                     "roc_auc_val": "mean",
                     "roc_auc_test": "mean",
                     "inference_time": "mean",
-                    "name": "first"
+                    "name": "first",
                 }
             )
             .reset_index()

@@ -221,6 +221,7 @@ def evaluate_ensemble(
                 ],
                 "weights": [ensemble.weights_[i] for i in set(ensemble.indices_)],
             }
+            print(perf_dict)
             performances.append(perf_dict)
     elif name == "GES":
         indices_so_far = []
@@ -264,6 +265,7 @@ def evaluate_ensemble(
                 "weights": [1 / len(indices_so_far)]
                 * len(set(indices_so_far)),  # Uniform weights as example
             }
+            print(perf_dict)
             performances.append(perf_dict)
     elif type(ensemble) == QDOEnsembleSelection:
         ensemble.ensemble_fit(predictions_val, y_val)
@@ -649,7 +651,7 @@ if __name__ == "__main__":
     main(
         args.seed,
         run_singleBest=False,
-        run_ges=False,
+        run_ges=True,
         run_multi_ges=True,
         run_qo=False,
         run_qdo=False,
