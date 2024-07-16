@@ -84,8 +84,7 @@ def parse_dataframes(
         df_seed["inference_time"] = df_seed.apply(
             get_inference_time, axis=1, args=(repo, metrics)
         )
-        
-        
+
         # After calculating inference times, convert 'models_used' back to lists:
         df_seed["models_used"] = df_seed["models_used"].apply(list)
         all_dfs.append(df_seed)
@@ -222,7 +221,7 @@ def calculate_average_hypervolumes(df, method_name):
 
                 objectives = np.array(
                     [
-                        df_fold["normalized_roc_auc"].values,
+                        df_fold["negated_normalized_roc_auc"].values,
                         df_fold["normalized_time"].values,
                     ]
                 ).T
@@ -230,8 +229,8 @@ def calculate_average_hypervolumes(df, method_name):
                 efficient_objectives = objectives[is_efficient]
 
                 ref_point = [
-                    1,
-                    1,
+                    1.01,
+                    1.01,
                 ]  # Reference point beyond the worst values of objectives
                 hv = pg.hypervolume(efficient_objectives)
                 hypervolume = hv.compute(ref_point)
@@ -539,18 +538,18 @@ def create_latex_table(df, repo, filename="table.tex", max_char=15):
         f.write("\\end{longtable}\n")
 
 
-def plot_task_scatterplots(df, directory=""):
+def plot_task_scatterplots(df: pd.DataFrame, directory=""):
     """
-    Plots and saves scatterplots for each task from the DataFrame, combining all methods per task.
+    Plots and saves scatterplots and a boxplot for each task from the DataFrame,
+    combining all methods per task, and plots the counts of each method using a boxplot. Data is sampled
+    to match the lowest count of solutions across methods in each task.
 
     Parameters:
-    - df (DataFrame): Pandas DataFrame containing the columns 'task', 'method_name', 'normalized_roc_auc',
+    - df (DataFrame): Pandas DataFrame containing the columns 'task', 'method_name', 'negated_normalized_roc_auc',
       'normalized_time', and 'name'.
     - directory (str, optional): Directory to save the plots to. Default is the current directory.
-
-    Each plot is saved as 'scatter_plot_{task}.png' and plots the normalized ROC AUC against
-    normalized computation time for all methods in that task, with each method differently colored.
     """
+    print("Creating scatter plots...")
     sns.set(style="whitegrid")  # Set the style of the plots with seaborn
 
     # Create directory if it does not exist
@@ -559,9 +558,22 @@ def plot_task_scatterplots(df, directory=""):
 
     # Loop through each task
     for task, group in df.groupby("task"):
+        # Calculate the minimum count of any method within the task
+        min_count = group["method_name"].value_counts().min()
+
+        # Sample each method in the task to have the same count as the minimum found
+        sampled_group = pd.DataFrame()
+        for name, sub_group in group.groupby("method_name"):
+            sampled_sub_group = sub_group.sample(
+                n=min_count, random_state=42, replace=False
+            )
+            sampled_group = pd.concat(
+                [sampled_group, sampled_sub_group], ignore_index=True
+            )
+
         plt.figure(figsize=(10, 6))
-        sns.scatterplot(
-            data=group,
+        scatter_plot = sns.scatterplot(
+            data=sampled_group,
             x="negated_normalized_roc_auc",
             y="normalized_time",
             hue="method_name",
@@ -572,7 +584,20 @@ def plot_task_scatterplots(df, directory=""):
         plt.title(f"Scatter Plot for Task: {task}")
         plt.xlabel("Normalized ROC AUC")
         plt.ylabel("Normalized Time")
-        plt.legend(title="Method Name", bbox_to_anchor=(1.05, 1), loc="upper left")
+
+        # Record counts after sampling
+        counts = sampled_group["method_name"].value_counts()
+        print(f"Task {task} - Counts per method after sampling: {counts.to_dict()}")
+
+        handles, labels = scatter_plot.get_legend_handles_labels()
+        new_labels = [f"{label} (n={counts[label]})" for label in labels]
+        plt.legend(
+            handles,
+            new_labels,
+            title="Method Name",
+            bbox_to_anchor=(1.05, 1),
+            loc="upper left",
+        )
 
         # Constructing file path
         filename = f"scatter_plot_{task}.png"
@@ -647,7 +672,6 @@ if __name__ == "__main__":
         )
 
         df.to_csv("data/full.csv")
-        exit()
         plot_task_scatterplots(df, directory="plots/scatter")
 
         # Hypervolume
