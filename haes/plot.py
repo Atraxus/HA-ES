@@ -82,7 +82,7 @@ def parse_dataframes(
         all_dfs.append(df_seed)
 
     df = pd.concat(all_dfs)
-    df.drop(columns=["task", "iteration", "weights", "models_used", "dataset", "meta"])
+    df = df.drop(columns=["task", "iteration", "weights", "models_used", "dataset", "meta"], errors="ignore")
 
     print(f"df shape: {df.shape}")
     print(df.columns)
@@ -92,7 +92,7 @@ def parse_dataframes(
     return df
 
 
-def normalize_data(data, high_is_better=True):
+def normalize_data(data):
     """Normalize data to [0, 1] range; handle cases with NaN or zero range."""
     min_val = np.nanmin(data)  # Use nanmin to ignore NaNs
     max_val = np.nanmax(data)  # Use nanmax to ignore NaNs
@@ -105,30 +105,20 @@ def normalize_data(data, high_is_better=True):
         return np.zeros_like(data)
 
     normalized_data = (data - min_val) / (max_val - min_val)
-    if high_is_better:
-        normalized_data = 1 - normalized_data
 
     return normalized_data
 
 
-def normalize_per_task_method_and_seed(df):
-    # Apply normalization based on 'method', 'task', and 'seed'
-    for method_name in df["method"].unique():
-        for task in df[df["method"] == method_name]["task"].unique():
-            for seed in df[(df["method"] == method_name) & (df["task"] == task)][
-                "seed"
-            ].unique():
-                mask = (
-                    (df["method"] == method_name)
-                    & (df["task"] == task)
-                    & (df["seed"] == seed)
-                )
-                df.loc[mask, "normalized_roc_auc"] = normalize_data(
-                    -df.loc[mask, "roc_auc_test"], high_is_better=False
-                )
-                df.loc[mask, "normalized_time"] = normalize_data(
-                    df.loc[mask, "inference_time"], high_is_better=False
-                )
+def normalize_per_task_and_seed(df):
+    for task in df["task"].unique():
+        for seed in df[df["task"] == task]["seed"].unique():
+            mask = (df["task"] == task) & (df["seed"] == seed)
+            df.loc[mask, "negated_normalized_roc_auc"] = normalize_data(
+                -df.loc[mask, "roc_auc_test"]
+            )
+            df.loc[mask, "normalized_time"] = normalize_data(
+                df.loc[mask, "inference_time"]
+            )
     return df
 
 
@@ -190,7 +180,6 @@ def boxplot(
 
     # save to file
     plt.savefig("plots/boxplot_" + y_str + ".png", dpi=300, bbox_inches="tight")
-    plt.savefig("plots/boxplot_" + y_str + ".svg", dpi=300, bbox_inches="tight")
     plt.savefig("plots/boxplot_" + y_str + ".pdf", dpi=300, bbox_inches="tight")
 
 
@@ -539,7 +528,7 @@ if __name__ == "__main__":
             df["method_name"] = df["method"].map(method_id_name_dict)
         else:
             raise ValueError("Column 'method' not found in DataFrame")
-        normalize_per_task_method_and_seed(df)
+        normalize_per_task_and_seed(df)
         print(df.head())
         print(df.columns)
         print(df["method"].unique())
@@ -548,7 +537,7 @@ if __name__ == "__main__":
         # Assume avg_over_seeds DataFrame is available from your existing script
         create_latex_table(df, repo)
 
-        # Hypervolume #TODO: fix names
+        # Hypervolume
         methods = ["GES", "QO-ES", "QDO-ES", "Size-QDO-ES", "Infer-QDO-ES"]
         all_hypervolumes = {}
 
@@ -581,13 +570,13 @@ if __name__ == "__main__":
             pivot_hypervolumes,
             maximize_metric=True,
             plt_title="Hypervolume Critical Difference Plot",
-            filename="CDPHypervolumes.pdf",
+            filename="plots/CDPHypervolumes.pdf",
         )
         result = cd_evaluation(
             pivot_hypervolumes,
             maximize_metric=True,
             plt_title="Hypervolume Critical Difference Plot",
-            filename="CDPHypervolumes.svg",
+            filename="plots/CDPHypervolumes.png",
         )
         print(df.columns)
 
@@ -646,13 +635,13 @@ if __name__ == "__main__":
             pivot_ranks,
             maximize_metric=False,
             plt_title="Rankings Critical Difference Plot",
-            filename="CDPRankings.pdf",
+            filename="plots/CDPRankings.pdf",
         )
         cd_evaluation(
             pivot_ranks,
             maximize_metric=False,
             plt_title="Rankings Critical Difference Plot",
-            filename="CDPRankings.svg",
+            filename="plots/CDPRankings.png",
         )
 
     # main()
