@@ -24,7 +24,7 @@ def check_files_for_numbers(directory, numbers):
     # Print out files that contain the numbers
     for number in numbers:
         if found[str(number)]:
-            print(f"Files containing {number}: {', '.join(found[str(number)])}")
+            print(f"#{len(found[str(number)])} Files containing {number}: {', '.join(found[str(number)])}")
         else:
             print(f"No files found containing {number}")
 
@@ -42,4 +42,4 @@ for dataset in datasets:
     #print(f"{dataset} tid: {tid}")
     task_numbers.append("_" + str(tid) + "_0")
     
-# check_files_for_numbers("results/seed_1/", task_numbers)
+check_files_for_numbers("results/seed_1/", task_numbers)

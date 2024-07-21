@@ -82,12 +82,12 @@ def parse_dataframes(
         all_dfs.append(df_seed)
 
     df = pd.concat(all_dfs)
-    df = df.drop(columns=["task", "iteration", "weights", "models_used", "dataset", "meta"], errors="ignore")
+    # df = df.drop(columns=["task", "iteration", "weights", "models_used", "dataset", "meta"], errors="ignore")
 
     print(f"df shape: {df.shape}")
     print(df.columns)
-    print(df.groupby("method").agg("mean")["roc_auc_val"])
-    print(df.groupby("method").agg("mean")["roc_auc_test"])
+    # print(df.groupby("method").agg("mean")["roc_auc_val"])
+    # print(df.groupby("method").agg("mean")["roc_auc_test"])
 
     return df
 
@@ -105,20 +105,24 @@ def normalize_data(data):
         return np.zeros_like(data)
 
     normalized_data = (data - min_val) / (max_val - min_val)
-
     return normalized_data
 
 
-def normalize_per_task_and_seed(df):
+def normalize_per_task(df):
+    """Normalize scores per task across all seeds."""
     for task in df["task"].unique():
-        for seed in df[df["task"] == task]["seed"].unique():
-            mask = (df["task"] == task) & (df["seed"] == seed)
-            df.loc[mask, "negated_normalized_roc_auc"] = normalize_data(
-                -df.loc[mask, "roc_auc_test"]
-            )
-            df.loc[mask, "normalized_time"] = normalize_data(
-                df.loc[mask, "inference_time"]
-            )
+        task_mask = df["task"] == task
+
+        # Get the data for the whole task across all seeds
+        roc_auc_data = df.loc[task_mask, "roc_auc_test"]
+        inference_time_data = df.loc[task_mask, "inference_time"]
+
+        # Apply normalization
+        df.loc[task_mask, "negated_normalized_roc_auc"] = normalize_data(
+            -roc_auc_data
+        )  # Negate ROC AUC if needed
+        df.loc[task_mask, "normalized_time"] = normalize_data(inference_time_data)
+
     return df
 
 
@@ -212,7 +216,7 @@ def calculate_average_hypervolumes(df, method_name):
 
                 objectives = np.array(
                     [
-                        df_fold["normalized_roc_auc"].values,
+                        df_fold["negated_normalized_roc_auc"].values,
                         df_fold["normalized_time"].values,
                     ]
                 ).T
@@ -286,10 +290,10 @@ def plot_hypervolumes(all_hypervolumes):
 
     plt.tight_layout()  # Adjust the plot to fit into the figure area nicely
     plt.savefig(
-        "hypervolume_comparison.pdf", dpi=300
+        "plots/hypervolume_comparison.png", dpi=300
     )  # Save the figure with high resolution
     plt.savefig(
-        "hypervolume_comparison.pdf", dpi=300
+        "plots/hypervolume_comparison.pdf", dpi=300
     )  # Save the figure with high resolution
     plt.close()
 
@@ -455,15 +459,19 @@ def cd_evaluation(
 
     return result
 
-def create_latex_table(df, repo, filename='table.tex', max_char=15):
-    import numpy as np
 
-    methods = df['method_name'].unique()
-    task_ids = df['task_id'].unique()
-    
-    with open(filename, 'w') as f:
+def create_latex_table(df, repo, max_char=15):
+    if not os.path.exists("tables"):
+        os.makedirs("tables")
+
+    methods = df["method_name"].unique()
+    task_ids = df["task_id"].unique()
+
+    with open("tables/table.tex", "w") as f:
         f.write("\\begin{longtable}{l" + "c" * len(methods) + "}\n")
-        f.write("\\caption{Test ROC AUC - Binary: The mean and standard deviation of the test score over all folds for each method. The best methods per dataset are shown in bold. All methods close to the best method are considered best (using NumPy’s default \\texttt{isclose} function).}\n")
+        f.write(
+            "\\caption{Test ROC AUC - Binary: The mean and standard deviation of the test score over all folds for each method. The best methods per dataset are shown in bold. All methods close to the best method are considered best (using NumPy’s default \\texttt{isclose} function).}\n"
+        )
         f.write("\\label{tab:results} \\\\ \n")
         f.write("\\toprule\n")
         f.write("Dataset & " + " & ".join(map(str, methods)) + " \\\\\n")
@@ -474,42 +482,131 @@ def create_latex_table(df, repo, filename='table.tex', max_char=15):
         f.write("\\midrule\n")
         f.write("\\endhead\n")
         f.write("\\midrule\n")
-        f.write("\\multicolumn{" + str(len(methods) + 1) + "}{r}{Continued on next page} \\\\\n")
+        f.write(
+            "\\multicolumn{"
+            + str(len(methods) + 1)
+            + "}{r}{Continued on next page} \\\\\n"
+        )
         f.write("\\midrule\n")
         f.write("\\endfoot\n")
         f.write("\\bottomrule\n")
         f.write("\\endlastfoot\n")
-        
+
         for task_id in task_ids:
-            dataset_name = repo.tid_to_dataset(task_id)  # Convert task_id to dataset name
-            truncated_name = (dataset_name[:max_char] + '...') if len(dataset_name) > max_char else dataset_name
-            escaped_name = truncated_name.replace('_', '\\_')  # Escape underscores
+            dataset_name = repo.tid_to_dataset(
+                task_id
+            )  # Convert task_id to dataset name
+            truncated_name = (
+                (dataset_name[:max_char] + "...")
+                if len(dataset_name) > max_char
+                else dataset_name
+            )
+            escaped_name = truncated_name.replace("_", "\\_")  # Escape underscores
             line = [str(escaped_name)]  # Ensure the first item is a string
             method_scores = []
-            
+
             for method in methods:
-                method_data = df[(df['task_id'] == task_id) & (df['method_name'] == method)]
+                method_data = df[
+                    (df["task_id"] == task_id) & (df["method_name"] == method)
+                ]
                 if not method_data.empty:
-                    mean_score = method_data['roc_auc_test'].mean()
-                    std_dev = method_data['roc_auc_test'].std()
+                    mean_score = method_data["roc_auc_test"].mean()
+                    std_dev = method_data["roc_auc_test"].std()
                     score_str = f"{mean_score:.4f}($\\pm${std_dev:.4f})"
                     method_scores.append((mean_score, score_str))
                 else:
                     method_scores.append((None, "-"))
-            
+
             # Determine the best score
-            best_score = max(score[0] for score in method_scores if score[0] is not None)
-            
+            best_score = max(
+                score[0] for score in method_scores if score[0] is not None
+            )
+
             for mean_score, score_str in method_scores:
                 if mean_score is not None and np.isclose(mean_score, best_score):
                     line.append(f"\\textbf{{{score_str}}}")
                 else:
                     line.append(score_str)
-                    
+
             f.write(" & ".join(line) + " \\\\\n")
-        
+
         f.write("\\bottomrule\n")
         f.write("\\end{longtable}\n")
+
+
+def plot_task_scatterplots(df: pd.DataFrame, directory="plots/scatter/"):
+    """
+    Plots and saves separate high-quality scatterplots for each method within each task from the DataFrame,
+    enforcing the X and Y axes to be within the range of 0 to 1. Plots are saved in both PNG and PDF formats
+    in their respective folders under the base directory.
+
+    Parameters:
+    - df (DataFrame): Pandas DataFrame containing the columns 'task', 'method_name', 'negated_normalized_roc_auc',
+      'normalized_time', and 'name'.
+    - directory (str, optional): Base directory to save the plots to, with subdirectories for each format.
+    """
+    print("Creating scatter plots...")
+    sns.set(
+        style="whitegrid", font_scale=1.5
+    )  # Increase the font scale for better readability in papers
+
+    # Define directories for file formats
+    png_directory = os.path.join(directory, "png")
+    pdf_directory = os.path.join(directory, "pdf")
+
+    # Create directories if they do not exist
+    for directory in [png_directory, pdf_directory]:
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+
+    # Loop through each task
+    for task, group in df.groupby("task"):
+        # Calculate the minimum count of any method within the task
+        min_count = group["method_name"].value_counts().min()
+
+        # Loop through each method within the task
+        for method_name, method_group in group.groupby("method_name"):
+            sampled_method_group = method_group.sample(
+                n=min_count, random_state=42, replace=False
+            )
+
+            plt.figure(figsize=(8, 6))
+            sns.scatterplot(
+                data=sampled_method_group,
+                x="negated_normalized_roc_auc",
+                y="normalized_time",
+                s=100,  # Reduced size from 150 to 100
+                alpha=0.9,  # Added opacity control at 70%
+                label=method_name,  # Make sure label is applied
+                edgecolor="k",
+                linewidth=1,
+            )
+
+            # Set axis limits with a slight buffer to make edge points visible
+            plt.xlim(-0.05, 1)
+            plt.ylim(-0.05, 1)
+
+            # Highlight the zero lines for better visibility
+            plt.axhline(0, color="grey", linewidth=2)  # Horizontal zero line
+            plt.axvline(0, color="grey", linewidth=2)  # Vertical zero line
+
+            # Adding titles and labels with enhanced font sizes
+            plt.title(f"Scatter Plot for Task: {task} - Method: {method_name}")
+            plt.xlabel("Negated Normalized ROC AUC")
+            plt.ylabel("Normalized Time")
+
+            # Constructing file paths
+            png_filename = os.path.join(
+                png_directory, f"scatter_plot_{task}_{method_name}.png"
+            )
+            pdf_filename = os.path.join(
+                pdf_directory, f"scatter_plot_{task}_{method_name}.pdf"
+            )
+
+            # Save the plot in both formats
+            plt.savefig(png_filename, bbox_inches="tight", format="png")
+            plt.savefig(pdf_filename, bbox_inches="tight", format="pdf")
+            plt.close()  # Close the figure to free memory
 
 
 if __name__ == "__main__":
@@ -519,7 +616,11 @@ if __name__ == "__main__":
         df = parse_dataframes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], repo=repo)
         print(df["method"].unique())
         df.reset_index(drop=True, inplace=True)
+
+        if not os.path.exists("data"):
+            os.makedirs("data")
         df.to_json("data/full.json")
+        df.to_csv("data/full.csv")
     else:
         print("Loading data. This might take a while...")
         df = pd.read_json("data/full.json")
@@ -528,7 +629,7 @@ if __name__ == "__main__":
             df["method_name"] = df["method"].map(method_id_name_dict)
         else:
             raise ValueError("Column 'method' not found in DataFrame")
-        normalize_per_task_and_seed(df)
+        normalize_per_task(df)
         print(df.head())
         print(df.columns)
         print(df["method"].unique())
@@ -536,6 +637,7 @@ if __name__ == "__main__":
         repo = load_repository(context_name, cache=True)
         # Assume avg_over_seeds DataFrame is available from your existing script
         create_latex_table(df, repo)
+        plot_task_scatterplots(df, directory="plots/scatter")
 
         # Hypervolume
         methods = ["GES", "QO-ES", "QDO-ES", "Size-QDO-ES", "Infer-QDO-ES"]
@@ -547,8 +649,9 @@ if __name__ == "__main__":
 
         print("Plotting hypervolumes...")
         plot_hypervolumes(all_hypervolumes)
+        exit()
         hypervolumes_df = pd.DataFrame(all_hypervolumes)
-        hypervolumes_df.to_csv("hypervolumes.csv", index=False)
+        hypervolumes_df.to_csv("data/hypervolumes.csv", index=False)
 
         data = []
         for method, tasks in all_hypervolumes.items():
@@ -566,6 +669,8 @@ if __name__ == "__main__":
         print(pivot_hypervolumes.shape)
 
         # Now you can use the modified cd_evaluation function
+        if not os.path.exists("plots"):
+            os.makedirs("plots")
         result = cd_evaluation(
             pivot_hypervolumes,
             maximize_metric=True,

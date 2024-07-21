@@ -1,5 +1,8 @@
-plots/pareto_fronts
+plots/scatter/
 results/
+
+# Json is too large
+data/full.json 
 
 
 
