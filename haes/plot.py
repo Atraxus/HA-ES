@@ -610,7 +610,7 @@ def plot_task_scatterplots(df: pd.DataFrame, directory="plots/scatter/"):
 
 
 if __name__ == "__main__":
-    reload = False
+    reload = True
     if reload:
         repo = load_repository("D244_F3_C1530_100", cache=True)
         df = parse_dataframes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], repo=repo)
@@ -649,7 +649,6 @@ if __name__ == "__main__":
 
         print("Plotting hypervolumes...")
         plot_hypervolumes(all_hypervolumes)
-        exit()
         hypervolumes_df = pd.DataFrame(all_hypervolumes)
         hypervolumes_df.to_csv("data/hypervolumes.csv", index=False)
 
