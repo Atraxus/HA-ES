@@ -5,7 +5,7 @@ To evaluate our approach and compare it to the existing algorithms, we use TabRe
 
 
 ## Set-Up
-This set-up guide expects a Linux system.
+This set-up guide expects a Linux system. We ran the experiments on Python version 3.10.14. 
 
 ### (Optional) Create venv
 It's good practice to use a virtual environment. This isolates your project dependencies from global Python installations. This is how you create a virtual environment in your project directory:
@@ -16,9 +16,10 @@ To activate it use:
 
 ### Dependencies
 From the project root run the following commands to install the dependencies (`-e` to automatically install changes made to the code of the dependencies)
+- `pip install -r requirements.txt`
 - `python3 -m pip install -e extern/tabrepo`
 - `python3 -m pip install -e extern/phem`
 
 ### Run test
-To run the current state of development use
-- `python3 haes/main.py`
+To run the experiments use
+- `python3 haes/generate_data.py`
