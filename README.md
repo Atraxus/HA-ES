@@ -23,3 +23,8 @@ From the project root run the following commands to install the dependencies (`-
 ### Run test
 To run the experiments use
 - `python3 haes/generate_data.py`
+
+## Relevant Publication
+If you use HA-ES in scientific publications, we would appreciate citations.
+
+Maier, J., Möller, F., & Purucker, L. (2024). Hardware Aware Ensemble Selection for Balancing Predictive Accuracy and Cost. Paper presented at the Third International Conference on Automated Machine Learning (AutoML 2024) Workshop. arXiv. https://arxiv.org/abs/2408.02280
