@@ -3,6 +3,7 @@ results/
 # Json is too large
 data/full.json 
 
+models/
 
 
 # Byte-compiled / optimized / DLL files
