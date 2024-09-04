@@ -4,6 +4,7 @@ results/
 data/full.json 
 
 models/
+plots/scatter
 
 
 # Byte-compiled / optimized / DLL files

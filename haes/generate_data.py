@@ -9,6 +9,10 @@ from phem.methods.ensemble_selection.qdo.behavior_spaces import (
 )
 from phem.application_utils.supported_metrics import msc
 from phem.methods.ensemble_selection.qdo.qdo_es import QDOEnsembleSelection
+from phem.methods.ensemble_selection.qdo.behavior_functions.basic import (
+    LossCorrelationMeasure,
+)
+from phem.methods.ensemble_selection.qdo.behavior_space import BehaviorFunction
 
 from sklearn.metrics import roc_auc_score
 from dataclasses import dataclass, field
@@ -86,14 +90,44 @@ def expand_binary_predictions(predictions):
     return expanded_predictions
 
 
+def ensemble_inference_time(input_metadata: list[dict]):
+    """A custom behavior function.
+
+    Some Notes:
+        - The input_metadata here is the metadata for each base model in the ensemble. How this is called is defined in
+            phem.methods.ensemble_selection.qdo.qdo_es.evaluate_single_solution.
+        - The behavior function definition and arguments depends on its definition in the BehaviorFunction class (see below).
+            For all options, see phem.methods.ensemble_selection.qdo.behavior_space.BehaviorFunction.
+    """
+    return sum([md["val_predict_time"] for md in input_metadata])
+
+
+def ensemble_memory_usage(input_metadata: list[dict]):
+    """A custom behavior function for memory usage.
+
+    Some Notes:
+        - The input_metadata here is the metadata for each base model in the ensemble. How this is called is defined in
+            phem.methods.ensemble_selection.qdo.qdo_es.evaluate_single_solution.
+        - The behavior function definition and arguments depend on its definition in the BehaviorFunction class.
+    """
+    return sum([md["memory"] for md in input_metadata])
+
+
+def ensemble_disk_usage(input_metadata: list[dict]):
+    """A custom behavior function for disk space usage.
+
+    Some Notes:
+        - The input_metadata here is the metadata for each base model in the ensemble. How this is called is defined in
+            phem.methods.ensemble_selection.qdo.qdo_es.evaluate_single_solution.
+        - The behavior function definition and arguments depend on its definition in the BehaviorFunction class.
+    """
+    return sum([md["diskspace"] for md in input_metadata])
+
+
 def get_custom_behavior_space_with_inference_time(
     max_possible_inference_time: float,
 ) -> BehaviorSpace:
     # Using ensemble size (an existing behavior function) and a custom behavior function to create a 2D behavior space.
-    from phem.methods.ensemble_selection.qdo.behavior_functions.basic import (
-        LossCorrelationMeasure,
-    )
-    from phem.methods.ensemble_selection.qdo.behavior_space import BehaviorFunction
 
     EnsembleInferenceTime = BehaviorFunction(
         ensemble_inference_time,  # function to call.
@@ -109,16 +143,42 @@ def get_custom_behavior_space_with_inference_time(
     return BehaviorSpace([LossCorrelationMeasure, EnsembleInferenceTime])
 
 
-def ensemble_inference_time(input_metadata: list[dict]):
-    """A custom behavior function.
+def get_custom_behavior_space_with_memory_usage(
+    max_possible_memory_usage: float,
+) -> BehaviorSpace:
+    # Using ensemble size (an existing behavior function) and a custom behavior function to create a 2D behavior space.
 
-    Some Notes:
-        - The input_metadata here is the metadata for each base model in the ensemble. How this is called is defined in
-            phem.methods.ensemble_selection.qdo.qdo_es.evaluate_single_solution.
-        - The behavior function definition and arguments depends on its definition in the BehaviorFunction class (see below).
-            For all options, see phem.methods.ensemble_selection.qdo.behavior_space.BehaviorFunction.
-    """
-    return sum([md["val_predict_time"] for md in input_metadata])
+    EnsembleMemoryUsage = BehaviorFunction(
+        ensemble_memory_usage,  # function to call.
+        # define the required arguments for the function `ensemble_memory_usage`
+        required_arguments=["input_metadata"],
+        # Define the initial starting range of the behavior space (due to using a sliding boundaries archive, this will be re-mapped anyhow)
+        range_tuple=(0, max_possible_memory_usage + 1),  # +1 for safety.
+        # Defines which kind of prediction data is needed as input (if any)
+        required_prediction_format="none",
+        name="Ensemble Memory Usage",
+    )
+
+    return BehaviorSpace([LossCorrelationMeasure, EnsembleMemoryUsage])
+
+
+def get_custom_behavior_space_with_disk_usage(
+    max_possible_disk_usage: float,
+) -> BehaviorSpace:
+    # Using ensemble size (an existing behavior function) and a custom behavior function to create a 2D behavior space.
+
+    EnsembleDiskUsage = BehaviorFunction(
+        ensemble_disk_usage,  # function to call.
+        # define the required arguments for the function `ensemble_disk_usage`
+        required_arguments=["input_metadata"],
+        # Define the initial starting range of the behavior space (due to using a sliding boundaries archive, this will be re-mapped anyhow)
+        range_tuple=(0, max_possible_disk_usage + 1),  # +1 for safety.
+        # Defines which kind of prediction data is needed as input (if any)
+        required_prediction_format="none",
+        name="Ensemble Disk Usage",
+    )
+
+    return BehaviorSpace([LossCorrelationMeasure, EnsembleDiskUsage])
 
 
 def plot_archive(qdo_es: QDOEnsembleSelection, name: str):
@@ -342,6 +402,7 @@ def load_and_process_base_models(
     average_time_train = dataset_fold_metrics["time_train_s"].mean()
 
     # Iterate over each config to create a base model representation
+    df_usage_measurements = pd.read_csv("data/model_memory_and_disk_usage.csv")
     base_models = []
     predictions_val = []
     predictions_test = []
@@ -377,6 +438,12 @@ def load_and_process_base_models(
         predictions_test.append(
             repo.predict_test(dataset=dataset, fold=fold, config=config)
         )
+        memory_used = df_usage_measurements.loc[
+            df_usage_measurements["Model"] == config_key, "Memory"
+        ].values[0]
+        disk_space_used = df_usage_measurements.loc[
+            df_usage_measurements["Model"] == config_key, "Models_Size"
+        ].values[0]
 
         # Wrap predictions in the FakedFittedAndValidatedClassificationBaseModel
         model = FakedFittedAndValidatedClassificationBaseModel(
@@ -387,6 +454,8 @@ def load_and_process_base_models(
                 "fit_time": time_train_s,
                 "test_predict_time": time_infer_s,
                 "val_predict_time": time_infer_s,  #!
+                "memory": memory_used,
+                "diskspace": disk_space_used,
                 "config": config_dict,
                 "auto-sklearn-model": "PLACEHOLDER",  #! What to pick here as equivalent? Is it even used later on?
             },
@@ -479,6 +548,8 @@ def main(
     run_qdo: bool = False,
     run_infer_time_qdo: bool = False,
     run_ens_size_qdo: bool = False,
+    run_memory_qdo: bool = False,
+    run_disk_qdo: bool = False,
 ):
     # Define the context for the ensemble evaluation
     context_name = "D244_F3_C1530_30"
@@ -645,16 +716,72 @@ def main(
                 seed=random_seed,
             )
 
+        # QDO evaluation with memory usage and loss correlation
+        if run_memory_qdo:
+            max_possible_ensemble_memory_usage = sum(
+                [bm.model_metadata["memory"] for bm in base_models],
+            )
+            memory_qdo = QDOEnsembleSelection(
+                base_models=base_models,
+                n_iterations=3,
+                score_metric=msc(
+                    metric_name=metric_name, is_binary=is_binary, labels=labels
+                ),
+                random_state=random_seed,
+                behavior_space=get_custom_behavior_space_with_memory_usage(
+                    max_possible_ensemble_memory_usage
+                ),
+                base_models_metadata_type="custom",
+            )
+            evaluate_ensemble(
+                "MEMORY_QDO",
+                memory_qdo,
+                repo,
+                task,
+                predictions_val,
+                predictions_test,
+                seed=random_seed,
+            )
+
+        # QDO evaluation with disk usage and loss correlation
+        if run_disk_qdo:
+            max_possible_ensemble_disk_usage = sum(
+                [bm.model_metadata["diskspace"] for bm in base_models],
+            )
+            disk_qdo = QDOEnsembleSelection(
+                base_models=base_models,
+                n_iterations=3,
+                score_metric=msc(
+                    metric_name=metric_name, is_binary=is_binary, labels=labels
+                ),
+                random_state=random_seed,
+                behavior_space=get_custom_behavior_space_with_disk_usage(
+                    max_possible_ensemble_disk_usage
+                ),
+                base_models_metadata_type="custom",
+            )
+            evaluate_ensemble(
+                "DISK_QDO",
+                disk_qdo,
+                repo,
+                task,
+                predictions_val,
+                predictions_test,
+                seed=random_seed,
+            )
+
 
 if __name__ == "__main__":
     args = parse_args()
     main(
         args.seed,
         run_singleBest=False,
-        run_ges=True,
-        run_multi_ges=True,
+        run_ges=False,
+        run_multi_ges=False,
         run_qo=False,
-        run_qdo=False,
-        run_infer_time_qdo=False,
+        run_qdo=True,
+        run_infer_time_qdo=True,
         run_ens_size_qdo=False,
+        run_memory_qdo=True,
+        run_disk_qdo=True,
     )

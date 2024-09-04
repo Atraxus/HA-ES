@@ -116,8 +116,20 @@ def parse_dataframes(
 if __name__ == "__main__":
     repo = load_repository("D244_F3_C1530_30", cache=True)
     df = parse_dataframes(
-        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], repo=repo, method_names=["GES", "MULTI_GES"]
-    )  # ["GES", "QO", "QDO", "ENS_SIZE_QDO", "INFER_TIME_QDO"])
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        repo=repo,
+        method_names=[
+            "SINGLE_BEST",
+            # "GES",
+            # "MULTI_GES",
+            # "QO",
+            "QDO",
+            "ENS_SIZE_QDO",
+            "INFER_TIME_QDO",
+            "DISK_QDO",
+            "MEMORY_QDO",
+        ],
+    )
     print(df["method"].unique())
     df.reset_index(drop=True, inplace=True)
 
