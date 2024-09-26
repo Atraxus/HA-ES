@@ -219,6 +219,8 @@ def plot_archive(qdo_es: QDOEnsembleSelection, name: str):
 
     plt.savefig(f"archive_plots/{name}.png", dpi=300)
 
+    import os
+
 
 def evaluate_ensemble(
     name: str,
@@ -247,8 +249,6 @@ def evaluate_ensemble(
     for bm in ensemble.base_models:
         bm.switch_to_val_simulation()
 
-    performances = []
-
     if name == "MULTI_GES":
         num_solutions = 15
         infer_time_weights = np.linspace(0, 1, num=num_solutions)
@@ -257,112 +257,172 @@ def evaluate_ensemble(
             ensemble.loss_weight = 1 - time_weight
             ensemble.ensemble_fit(predictions_val, y_val)
             print(f"\tFitting MULTI_GES for time weight {time_weight}")
-            y_pred_val = ensemble.ensemble_predict_proba(predictions_val)
-            y_pred_test = ensemble.ensemble_predict_proba(predictions_test)
-            if number_of_classes == 2:
-                y_pred_val = y_pred_val[:, 1]
-                y_pred_test = y_pred_test[:, 1]
 
-            y_test = repo.labels_test(dataset=dataset, fold=fold)
-            roc_auc_val = roc_auc_score(
-                y_val, y_pred_val, multi_class="ovr", average="macro"
-            )
-            roc_auc_test = roc_auc_score(
-                y_test, y_pred_test, multi_class="ovr", average="macro"
+            performances = process_ges_iterations(
+                ensemble,
+                predictions_val,
+                predictions_test,
+                y_val,
+                y_test,
+                number_of_classes,
+                name_prefix=f"MULTI_GES_{time_weight:.2f}",
+                time_weight=time_weight,
             )
 
-            perf_dict = {
-                "name": "MULTI_GES_" + "{:.2f}".format(time_weight),
-                "time_weight": time_weight,
-                "roc_auc_val": roc_auc_val,
-                "roc_auc_test": roc_auc_test,
-                "models_used": [
-                    ensemble.base_models[i].name for i in set(ensemble.indices_)
-                ],
-                "weights": [ensemble.weights_[i] for i in set(ensemble.indices_)],
-            }
-            print(perf_dict)
-            performances.append(perf_dict)
+            save_performances(
+                performances,
+                task,
+                dataset,
+                fold,
+                name,
+                seed,
+                filename_suffix=f"-{time_weight:.2f}",
+            )
     elif name == "GES":
-        indices_so_far = []
-        index_counts = Counter()
         ensemble.ensemble_fit(predictions_val, y_val)
-        for idx in ensemble.indices_:
-            indices_so_far.append(idx)
-            index_counts.update([idx])
-
-            # Calculate weights based on occurrence of each index
-            ensemble.weights_ = np.zeros(len(ensemble.base_models))
-            for index, count in index_counts.items():
-                ensemble.weights_[index] = count / len(indices_so_far)
-
-            selected_indices = list(index_counts.keys())
-            y_pred_val = ensemble.ensemble_predict_proba(
-                predictions_val[selected_indices, :]
-            )
-            y_pred_test = ensemble.ensemble_predict_proba(
-                predictions_test[selected_indices, :]
-            )
-            if number_of_classes == 2:
-                y_pred_val = y_pred_val[:, 1]
-                y_pred_test = y_pred_test[:, 1]
-
-            roc_auc_val = roc_auc_score(
-                y_val, y_pred_val, multi_class="ovr", average="macro"
-            )
-            roc_auc_test = roc_auc_score(
-                y_test, y_pred_test, multi_class="ovr", average="macro"
-            )
-
-            perf_dict = {
-                "name": "GES_" + str(len(indices_so_far)),
-                "iteration": len(indices_so_far),
-                "roc_auc_val": roc_auc_val,
-                "roc_auc_test": roc_auc_test,
-                "models_used": [
-                    ensemble.base_models[i].name for i in set(indices_so_far)
-                ],
-                "weights": [1 / len(indices_so_far)]
-                * len(set(indices_so_far)),  # Uniform weights as example
-            }
-            print(perf_dict)
-            performances.append(perf_dict)
-    elif type(ensemble) == QDOEnsembleSelection:
+        performances = process_ges_iterations(
+            ensemble,
+            predictions_val,
+            predictions_test,
+            y_val,
+            y_test,
+            number_of_classes,
+            name_prefix="GES",
+        )
+        save_performances(
+            performances,
+            task,
+            dataset,
+            fold,
+            name,
+            seed,
+        )
+    elif isinstance(ensemble, QDOEnsembleSelection):
         ensemble.ensemble_fit(predictions_val, y_val)
-        solutions = [np.array(e.sol) for e in ensemble.archive]
-        unique_tuples = set(tuple(array) for array in solutions)
-        unique_solutions = [np.array(t) for t in unique_tuples]
-        meta = [e.meta for e in ensemble.archive]
-
-        for i, solution in enumerate(unique_solutions):
-            ensemble.weights_ = solution
-            y_pred_val = ensemble.ensemble_predict_proba(predictions_val)
-            y_pred_test = ensemble.ensemble_predict_proba(predictions_test)
-            if number_of_classes == 2:
-                y_pred_val = y_pred_val[:, 1]
-                y_pred_test = y_pred_test[:, 1]
-
-            roc_auc_val = roc_auc_score(
-                y_val, y_pred_val, multi_class="ovr", average="macro"
-            )
-            roc_auc_test = roc_auc_score(
-                y_test, y_pred_test, multi_class="ovr", average="macro"
-            )
-
-            weight_indices = np.where(ensemble.weights_ != 0)[0]
-            perf_dict = {
-                "name": f"{name}_{i}",
-                "roc_auc_val": roc_auc_val,
-                "roc_auc_test": roc_auc_test,
-                "models_used": [ensemble.base_models[i].name for i in weight_indices],
-                "weights": ensemble.weights_[weight_indices],
-                "meta": meta[i],
-            }
-            performances.append(perf_dict)
+        performances = process_qdo_ensemble(
+            ensemble,
+            predictions_val,
+            predictions_test,
+            y_val,
+            y_test,
+            number_of_classes,
+            name,
+        )
+        save_performances(
+            performances,
+            task,
+            dataset,
+            fold,
+            name,
+            seed,
+        )
     else:
         pass
 
-    # Create a DataFrame from the list of performance dictionaries
+
+def process_ges_iterations(
+    ensemble,
+    predictions_val,
+    predictions_test,
+    y_val,
+    y_test,
+    number_of_classes,
+    name_prefix,
+    time_weight=None,
+):
+    indices_so_far = []
+    index_counts = Counter()
+    performances = []
+    for idx in ensemble.indices_:
+        indices_so_far.append(idx)
+        index_counts.update([idx])
+
+        # Calculate weights based on occurrence of each index
+        ensemble.weights_ = np.zeros(len(ensemble.base_models))
+        for index, count in index_counts.items():
+            ensemble.weights_[index] = count / len(indices_so_far)
+
+        selected_indices = list(index_counts.keys())
+        preds_val_selected = predictions_val[selected_indices]
+        preds_test_selected = predictions_test[selected_indices]
+
+        roc_auc_val, roc_auc_test = compute_performance(
+            ensemble,
+            preds_val_selected,
+            preds_test_selected,
+            y_val,
+            y_test,
+            number_of_classes,
+        )
+
+        perf_dict = {
+            "name": f"{name_prefix}_{len(indices_so_far)}",
+            "iteration": len(indices_so_far),
+            "roc_auc_val": roc_auc_val,
+            "roc_auc_test": roc_auc_test,
+            "models_used": [ensemble.base_models[i].name for i in selected_indices],
+            "weights": [ensemble.weights_[i] for i in selected_indices],
+        }
+        if time_weight is not None:
+            perf_dict["time_weight"] = time_weight
+        performances.append(perf_dict)
+    return performances
+
+
+def process_qdo_ensemble(
+    ensemble,
+    predictions_val,
+    predictions_test,
+    y_val,
+    y_test,
+    number_of_classes,
+    name,
+):
+    solutions = [np.array(e.sol) for e in ensemble.archive]
+    unique_solutions = {tuple(sol) for sol in solutions}
+    performances = []
+    for i, solution in enumerate(unique_solutions):
+        ensemble.weights_ = np.array(solution)
+        roc_auc_val, roc_auc_test = compute_performance(
+            ensemble,
+            predictions_val,
+            predictions_test,
+            y_val,
+            y_test,
+            number_of_classes,
+        )
+
+        weight_indices = np.where(ensemble.weights_ != 0)[0]
+        perf_dict = {
+            "name": f"{name}_{i}",
+            "roc_auc_val": roc_auc_val,
+            "roc_auc_test": roc_auc_test,
+            "models_used": [ensemble.base_models[i].name for i in weight_indices],
+            "weights": ensemble.weights_[weight_indices],
+        }
+        performances.append(perf_dict)
+    return performances
+
+
+def compute_performance(
+    ensemble, predictions_val, predictions_test, y_val, y_test, number_of_classes
+):
+    y_pred_val = ensemble.ensemble_predict_proba(predictions_val)
+    y_pred_test = ensemble.ensemble_predict_proba(predictions_test)
+    if number_of_classes == 2:
+        y_pred_val = y_pred_val[:, 1]
+        y_pred_test = y_pred_test[:, 1]
+
+    roc_auc_val = roc_auc_score(y_val, y_pred_val, multi_class="ovr", average="macro")
+    roc_auc_test = roc_auc_score(
+        y_test, y_pred_test, multi_class="ovr", average="macro"
+    )
+    return roc_auc_val, roc_auc_test
+
+
+def save_performances(
+    performances, task, dataset, fold, name, seed, filename_suffix=""
+):
     performance_df = pd.DataFrame(performances)
     performance_df["task"] = task
     performance_df["dataset"] = dataset
@@ -370,7 +430,8 @@ def evaluate_ensemble(
     performance_df["method"] = name
     if not os.path.exists(f"results/seed_{seed}"):
         os.makedirs(f"results/seed_{seed}")
-    performance_df.to_json(f"results/seed_{seed}/{name}_{task}.json")
+    filename = f"results/seed_{seed}/{name}{filename_suffix}_{task}.json"
+    performance_df.to_json(filename)
 
 
 def load_data(repo, context_name) -> tuple[list[str], list[str], list[int], dict]:
@@ -776,12 +837,12 @@ if __name__ == "__main__":
     main(
         args.seed,
         run_singleBest=False,
-        run_ges=False,
-        run_multi_ges=False,
+        run_ges=True,
+        run_multi_ges=True,
         run_qo=False,
-        run_qdo=True,
-        run_infer_time_qdo=True,
+        run_qdo=False,
+        run_infer_time_qdo=False,
         run_ens_size_qdo=False,
-        run_memory_qdo=True,
-        run_disk_qdo=True,
+        run_memory_qdo=False,
+        run_disk_qdo=False,
     )

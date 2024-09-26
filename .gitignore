@@ -1,4 +1,5 @@
 results/
+.vscode
 
 # Json is too large
 data/full.json 
