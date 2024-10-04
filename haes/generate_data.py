@@ -279,6 +279,9 @@ def evaluate_ensemble(
                 filename_suffix=f"-{time_weight:.2f}",
             )
     elif name == "GES":
+        # Ensure correct weights to avoid pollution from other tests
+        ensemble.time_weight = 0.0
+        ensemble.loss_weight = 1.0
         ensemble.ensemble_fit(predictions_val, y_val)
         performances = process_ges_iterations(
             ensemble,
@@ -670,9 +673,9 @@ def main(
                 predictions_test,
                 seed=random_seed,
             )
-        # GES evaluation
+        # Multi-GES evaluation
         if run_multi_ges:
-            ges = EnsembleSelection(
+            multi_ges = EnsembleSelection(
                 base_models=base_models,
                 n_iterations=100,
                 metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
@@ -680,7 +683,7 @@ def main(
             )
             evaluate_ensemble(
                 "MULTI_GES",
-                ges,
+                multi_ges,
                 repo,
                 task,
                 predictions_val,

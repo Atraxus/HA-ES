@@ -115,20 +115,35 @@ def parse_dataframes(
 
 if __name__ == "__main__":
     repo = load_repository("D244_F3_C1530_30", cache=True)
+    
+    # Create MULTI_GES method names based on infer_time_weights
+    if True:  # Add multi-ges
+        infer_time_weights = np.linspace(0, 1, num=15)
+        infer_time_weights = np.round(infer_time_weights, 2)
+        multi_ges_methods = [f"MULTI_GES-{time_weight}" for time_weight in infer_time_weights]
+    else:
+        multi_ges_methods = []  # Empty list if MULTI_GES is not needed
+    
+    # Original method names
+    method_names = [
+        # "SINGLE_BEST",
+        "GES",
+        # "MULTI_GES",
+        # "QO",
+        # "QDO",
+        # "ENS_SIZE_QDO",
+        # "INFER_TIME_QDO",
+        # "DISK_QDO",
+        # "MEMORY_QDO",
+    ]
+    
+    # Append the MULTI_GES method names
+    method_names.extend(multi_ges_methods)
+
     df = parse_dataframes(
         [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
         repo=repo,
-        method_names=[
-            "SINGLE_BEST",
-            # "GES",
-            # "MULTI_GES",
-            # "QO",
-            "QDO",
-            "ENS_SIZE_QDO",
-            "INFER_TIME_QDO",
-            "DISK_QDO",
-            "MEMORY_QDO",
-        ],
+        method_names=method_names,
     )
     print(df["method"].unique())
     df.reset_index(drop=True, inplace=True)
