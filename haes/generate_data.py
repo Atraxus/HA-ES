@@ -252,6 +252,8 @@ def evaluate_ensemble(
     if name == "MULTI_GES":
         num_solutions = 15
         infer_time_weights = np.linspace(0, 1, num=num_solutions)
+        infer_time_weights = infer_time_weights**3
+        infer_time_weights = 0.0 + (0.07 - 0.0) * infer_time_weights
         for time_weight in infer_time_weights:
             ensemble.time_weight = time_weight
             ensemble.loss_weight = 1 - time_weight
@@ -345,26 +347,24 @@ def process_ges_iterations(
         for index, count in index_counts.items():
             ensemble.weights_[index] = count / len(indices_so_far)
 
-        selected_indices = list(index_counts.keys())
-        preds_val_selected = predictions_val[selected_indices]
-        preds_test_selected = predictions_test[selected_indices]
-
+        # Removed the selection of predictions; use full predictions instead
         roc_auc_val, roc_auc_test = compute_performance(
             ensemble,
-            preds_val_selected,
-            preds_test_selected,
+            predictions_val,
+            predictions_test,
             y_val,
             y_test,
             number_of_classes,
         )
 
+        # Adjust the performance dictionary accordingly
         perf_dict = {
             "name": f"{name_prefix}_{len(indices_so_far)}",
             "iteration": len(indices_so_far),
             "roc_auc_val": roc_auc_val,
             "roc_auc_test": roc_auc_test,
-            "models_used": [ensemble.base_models[i].name for i in selected_indices],
-            "weights": [ensemble.weights_[i] for i in selected_indices],
+            "models_used": [ensemble.base_models[i].name for i in index_counts.keys()],
+            "weights": [ensemble.weights_[i] for i in index_counts.keys()],
         }
         if time_weight is not None:
             perf_dict["time_weight"] = time_weight
@@ -839,11 +839,11 @@ if __name__ == "__main__":
     args = parse_args()
     main(
         args.seed,
-        run_singleBest=False,
+        run_singleBest=True,
         run_ges=True,
-        run_multi_ges=True,
-        run_qo=False,
-        run_qdo=False,
+        run_multi_ges=False,
+        run_qo=True,
+        run_qdo=True,
         run_infer_time_qdo=False,
         run_ens_size_qdo=False,
         run_memory_qdo=False,

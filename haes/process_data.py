@@ -21,6 +21,9 @@ def get_inference_time(entry, repo, metrics):
     dataset = repo.task_to_dataset(entry["task"])
     configs = entry["models_used"]  # This is a tuple of configurations
 
+    dataset_fold_metrics = metrics.loc[(dataset, fold)]
+    average_time_infer = dataset_fold_metrics["time_infer_s"].mean()
+
     # Initialize total inference time
     total_inference_time = 0
 
@@ -31,6 +34,8 @@ def get_inference_time(entry, repo, metrics):
             selected_metrics = metrics.loc[(dataset, fold, config)]
             # Sum the 'time_infer_s' values for each configuration and add to total
             total_inference_time += selected_metrics["time_infer_s"].sum()
+        else:
+            total_inference_time += average_time_infer
 
     return total_inference_time
 
@@ -52,16 +57,26 @@ def normalize_data(data):
     return normalized_data
 
 
-def normalize_per_task_and_seed(df):
-    for task in df["task"].unique():
-        for seed in df[df["task"] == task]["seed"].unique():
-            mask = (df["task"] == task) & (df["seed"] == seed)
+def normalize_per_dataset(df):
+    for task_id in df["task_id"].unique():
+        mask = df["task_id"] == task_id
+        if "roc_auc_test" in df.columns:
             df.loc[mask, "negated_normalized_roc_auc"] = normalize_data(
                 -df.loc[mask, "roc_auc_test"]
             )
+        if "inference_time" in df.columns:
             df.loc[mask, "normalized_time"] = normalize_data(
                 df.loc[mask, "inference_time"]
             )
+        if "memory" in df.columns:
+            df.loc[mask, "normalized_memory"] = normalize_data(
+                df.loc[mask, "memory"]  #
+            )
+        if "disk_space" in df.columns:
+            df.loc[mask, "normalized_diskspace"] = normalize_data(
+                df.loc[mask, "disk_space"]
+            )
+
     return df
 
 
@@ -104,7 +119,7 @@ def parse_dataframes(
         all_dfs.append(df_seed)
 
     df = pd.concat(all_dfs)
-    normalize_per_task_and_seed(df)
+    normalize_per_dataset(df)
     # df = df.drop(
     #     columns=["task", "iteration", "weights", "models_used", "dataset", "meta"],
     #     errors="ignore",
@@ -114,31 +129,36 @@ def parse_dataframes(
 
 
 if __name__ == "__main__":
-    repo = load_repository("D244_F3_C1530_30", cache=True)
-    
+    repo = load_repository("D244_F3_C1530_100", cache=True)
+
     # Create MULTI_GES method names based on infer_time_weights
     if True:  # Add multi-ges
-        infer_time_weights = np.linspace(0, 1, num=15)
+        infer_time_weights = np.delete(np.linspace(0, 1, num=15), 0)
+        infer_time_weights = np.append(
+            infer_time_weights, np.array([0.01, 0.02, 0.03, 0.04, 0.05, 0.06])
+        )
         infer_time_weights = np.round(infer_time_weights, 2)
-        multi_ges_methods = [f"MULTI_GES-{time_weight}" for time_weight in infer_time_weights]
+        multi_ges_methods = [
+            f"MULTI_GES-{time_weight}" for time_weight in infer_time_weights
+        ]
     else:
         multi_ges_methods = []  # Empty list if MULTI_GES is not needed
-    
+
     # Original method names
     method_names = [
-        # "SINGLE_BEST",
+        "SINGLE_BEST",
         "GES",
         # "MULTI_GES",
         # "QO",
-        # "QDO",
+        "QDO",
         # "ENS_SIZE_QDO",
-        # "INFER_TIME_QDO",
+        "INFER_TIME_QDO",
         # "DISK_QDO",
         # "MEMORY_QDO",
     ]
-    
+
     # Append the MULTI_GES method names
-    method_names.extend(multi_ges_methods)
+    # method_names.extend(multi_ges_methods)
 
     df = parse_dataframes(
         [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
@@ -181,5 +201,19 @@ if __name__ == "__main__":
     print(f"ROC AUC for test set per method:\n{roc_auc_test}\n")
     inference_time = df.groupby("method").agg("mean")["inference_time"]
     print(f"Inference time per method:\n{inference_time}\n")
+
+    # Total number of entries
+    total_entries = df.shape[0]
+
+    # Number of entries with inference_time equal to 0
+    zero_infer_count = df[df["inference_time"] == 0].shape[0]
+
+    # Calculate the percentage of zero entries
+    percentage_zero = (zero_infer_count / total_entries) * 100
+
+    # Print the results
+    print(f"Total entries: {total_entries}")
+    print(f"Entries with inference time of 0: {zero_infer_count}")
+    print(f"Percentage of zero inference times: {percentage_zero:.2f}%")
 
     # main()
