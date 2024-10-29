@@ -219,8 +219,6 @@ def plot_archive(qdo_es: QDOEnsembleSelection, name: str):
 
     plt.savefig(f"archive_plots/{name}.png", dpi=300)
 
-    import os
-
 
 def evaluate_ensemble(
     name: str,
@@ -250,10 +248,8 @@ def evaluate_ensemble(
         bm.switch_to_val_simulation()
 
     if name == "MULTI_GES":
-        num_solutions = 15
+        num_solutions = 20
         infer_time_weights = np.linspace(0, 1, num=num_solutions)
-        infer_time_weights = infer_time_weights**3
-        infer_time_weights = 0.0 + (0.07 - 0.0) * infer_time_weights
         for time_weight in infer_time_weights:
             ensemble.time_weight = time_weight
             ensemble.loss_weight = 1 - time_weight
@@ -596,12 +592,6 @@ def evaluate_single_best_model(
     # Save DataFrame to JSON
     performance_df.to_json(f"{result_path}/SINGLE_BEST_{task}.json")
 
-    # Optionally print out results for verification
-    print(f"Best Model {best_model.name} ROC AUC Test Score for {task}: {test_score}")
-    print(
-        f"Best Model {best_model.name} ROC AUC Validation Score for {task}: {val_score}"
-    )
-
 
 def main(
     random_seed: int = 0,
@@ -616,7 +606,7 @@ def main(
     run_disk_qdo: bool = False,
 ):
     # Define the context for the ensemble evaluation
-    context_name = "D244_F3_C1530_30"
+    context_name = "D244_F3_C1530_100"
     # Load the repository with the specified context
     repo: EvaluationRepository = load_repository(context_name, cache=True)
     # Load the data
@@ -841,9 +831,9 @@ if __name__ == "__main__":
         args.seed,
         run_singleBest=True,
         run_ges=True,
-        run_multi_ges=False,
-        run_qo=True,
-        run_qdo=True,
+        run_multi_ges=True,
+        run_qo=False,
+        run_qdo=False,
         run_infer_time_qdo=False,
         run_ens_size_qdo=False,
         run_memory_qdo=False,
