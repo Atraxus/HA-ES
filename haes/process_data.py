@@ -40,6 +40,35 @@ def get_inference_time(entry, repo, metrics):
     return total_inference_time
 
 
+def insert_measurements(df):
+    # Read the CSV file
+    df_usage_measurements = pd.read_csv("data/model_memory_and_disk_usage.csv")
+
+    # Ensure that the 'Model' column is treated as a string
+    df_usage_measurements["Model"] = df_usage_measurements["Model"].astype(str)
+
+    # Explode the 'models_used' column to have one model per row
+    df_exploded = df.explode("models_used")
+
+    # Extract 'config_key' by removing the '_BAG_L1' suffix
+    df_exploded["config_key"] = df_exploded["models_used"].str.rsplit("_BAG_L1", n=1).str[0]
+
+    # Merge the exploded DataFrame with the usage measurements
+    df_merged = df_exploded.merge(
+        df_usage_measurements, left_on="config_key", right_on="Model", how="left"
+    )
+
+    # Fill NaN values with 0 for memory and disk space
+    df_merged[["Memory", "Models_Size"]] = df_merged[["Memory", "Models_Size"]].fillna(0)
+
+    # Group by the original index and sum the memory and disk space
+    df_usage = df_merged.groupby(level=0).agg({"Memory": "sum", "Models_Size": "sum"})
+
+    # Assign the aggregated usage data back to the original DataFrame
+    df["memory"] = df_usage["Memory"]
+    df["disk_space"] = df_usage["Models_Size"]
+
+
 def normalize_data(data):
     """Normalize data to [0, 1] range; handle cases with NaN or zero range."""
     min_val = np.nanmin(data)  # Use nanmin to ignore NaNs
@@ -94,7 +123,7 @@ def parse_dataframes(
         files = [
             f
             for f in os.listdir(filepath)
-            if f.endswith(".json") and any(name in f for name in method_names)
+            if f.endswith(".json") and any(name + '_' in f for name in method_names)
         ]
         for file in files:
             df = pd.read_json(filepath + file)
@@ -119,11 +148,6 @@ def parse_dataframes(
         all_dfs.append(df_seed)
 
     df = pd.concat(all_dfs)
-    normalize_per_dataset(df)
-    # df = df.drop(
-    #     columns=["task", "iteration", "weights", "models_used", "dataset", "meta"],
-    #     errors="ignore",
-    # )
 
     return df
 
@@ -133,13 +157,11 @@ if __name__ == "__main__":
 
     # Create MULTI_GES method names based on infer_time_weights
     if True:  # Add multi-ges
-        infer_time_weights = np.delete(np.linspace(0, 1, num=15), 0)
-        infer_time_weights = np.append(
-            infer_time_weights, np.array([0.01, 0.02, 0.03, 0.04, 0.05, 0.06])
-        )
+        num_solutions = 15
+        infer_time_weights = np.linspace(0, 1, num=num_solutions)
         infer_time_weights = np.round(infer_time_weights, 2)
         multi_ges_methods = [
-            f"MULTI_GES-{time_weight}" for time_weight in infer_time_weights
+            f"MULTI_GES-{time_weight:.2f}" for time_weight in infer_time_weights
         ]
     else:
         multi_ges_methods = []  # Empty list if MULTI_GES is not needed
@@ -150,21 +172,23 @@ if __name__ == "__main__":
         "GES",
         # "MULTI_GES",
         # "QO",
-        "QDO",
+        #"QDO",
         # "ENS_SIZE_QDO",
-        "INFER_TIME_QDO",
+        #"INFER_TIME_QDO",
         # "DISK_QDO",
         # "MEMORY_QDO",
     ]
 
     # Append the MULTI_GES method names
-    # method_names.extend(multi_ges_methods)
+    method_names.extend(multi_ges_methods)
 
     df = parse_dataframes(
         [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
         repo=repo,
         method_names=method_names,
     )
+    insert_measurements(df)
+    normalize_per_dataset(df)
     print(df["method"].unique())
     df.reset_index(drop=True, inplace=True)
 
@@ -179,28 +203,14 @@ if __name__ == "__main__":
     print(df.head())
 
     # Drop specified columns
-    df = df.drop(
-        columns=[
-            "task",
-            "iteration",
-            "weights",
-            "models_used",
-            "dataset",
-            "meta",
-            "name",
-            "fold",
-            "task_id",
-            "time_weight",
-            "seed",
-        ],
-        errors="ignore",
-    )
-    roc_auc_val = df.groupby("method").agg("mean")["roc_auc_val"]
-    print(f"ROC AUC for validation set per method:\n{roc_auc_val}\n")
-    roc_auc_test = df.groupby("method").agg("mean")["roc_auc_test"]
-    print(f"ROC AUC for test set per method:\n{roc_auc_test}\n")
-    inference_time = df.groupby("method").agg("mean")["inference_time"]
-    print(f"Inference time per method:\n{inference_time}\n")
+    filtered_data = df[df['method'].isin(method_names)]
+    
+    avg_roc_auc = filtered_data.groupby(['dataset', 'method'])['roc_auc_val'].mean().unstack()
+    print(f"ROC AUC for validation set per method and dataset:\n{avg_roc_auc}\n")
+    avg_roc_auc_test = filtered_data.groupby(['dataset', 'method'])['roc_auc_test'].mean().unstack()
+    print(f"ROC AUC for test set per method and dataset:\n{avg_roc_auc_test}\n")
+    inference_time = filtered_data.groupby(['dataset', 'method'])['inference_time'].mean().unstack()
+    print(f"Inference time per method and dataset:\n{inference_time}\n")
 
     # Total number of entries
     total_entries = df.shape[0]

@@ -254,7 +254,6 @@ def evaluate_ensemble(
             ensemble.time_weight = time_weight
             ensemble.loss_weight = 1 - time_weight
             ensemble.ensemble_fit(predictions_val, y_val)
-            print(f"\tFitting MULTI_GES for time weight {time_weight}")
 
             performances = process_ges_iterations(
                 ensemble,
@@ -606,7 +605,7 @@ def main(
     run_disk_qdo: bool = False,
 ):
     # Define the context for the ensemble evaluation
-    context_name = "D244_F3_C1530_100"
+    context_name = "D244_F3_C1530_10"
     # Load the repository with the specified context
     repo: EvaluationRepository = load_repository(context_name, cache=True)
     # Load the data
@@ -833,7 +832,7 @@ if __name__ == "__main__":
         run_ges=True,
         run_multi_ges=True,
         run_qo=False,
-        run_qdo=False,
+        run_qdo=True,
         run_infer_time_qdo=False,
         run_ens_size_qdo=False,
         run_memory_qdo=False,
