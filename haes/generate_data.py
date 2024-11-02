@@ -13,8 +13,8 @@ from phem.methods.ensemble_selection.qdo.behavior_functions.basic import (
     LossCorrelationMeasure,
 )
 from phem.methods.ensemble_selection.qdo.behavior_space import BehaviorFunction
+from phem.base_utils.metrics import AbstractMetric
 
-from sklearn.metrics import roc_auc_score
 from dataclasses import dataclass, field
 
 import os
@@ -227,27 +227,37 @@ def evaluate_ensemble(
     task: str,
     predictions_val: list[np.ndarray],
     predictions_test: list[np.ndarray],
+    y_val,
+    y_test,
+    metric: AbstractMetric,
     seed: int = 1,
 ):
-    dataset = repo.task_to_dataset(task)
-    fold = repo.task_to_fold(task)
-
-    y_test = repo.labels_test(dataset=dataset, fold=fold)
-    y_val = repo.labels_val(dataset=dataset, fold=fold)
-    predictions_val = np.array(predictions_val)
-    predictions_test = np.array(predictions_test)
-
-    number_of_classes = int(
-        repo.dataset_metadata(dataset=dataset)["NumberOfClasses"]
-    )  # 0 for regression
-    if number_of_classes == 2:
-        predictions_val = expand_binary_predictions(predictions_val)
-        predictions_test = expand_binary_predictions(predictions_test)
-
     for bm in ensemble.base_models:
         bm.switch_to_val_simulation()
 
-    if name == "MULTI_GES":
+    if name == "GES":
+        # Ensure correct weights to avoid pollution from other tests
+        ensemble.time_weight = 0.0
+        ensemble.loss_weight = 1.0
+        ensemble.ensemble_fit(predictions_val, y_val)
+        performances = process_ges_iterations(
+            ensemble,
+            predictions_val,
+            predictions_test,
+            y_val,
+            y_test,
+            metric,
+            name_prefix="GES",
+            task=task,  # Pass task for context
+        )
+        save_performances(
+            performances,
+            task,
+            repo,
+            name,
+            seed,
+        )
+    elif name == "MULTI_GES":
         num_solutions = 20
         infer_time_weights = np.linspace(0, 1, num=num_solutions)
         for time_weight in infer_time_weights:
@@ -261,7 +271,7 @@ def evaluate_ensemble(
                 predictions_test,
                 y_val,
                 y_test,
-                number_of_classes,
+                metric,
                 name_prefix=f"MULTI_GES_{time_weight:.2f}",
                 time_weight=time_weight,
             )
@@ -269,34 +279,11 @@ def evaluate_ensemble(
             save_performances(
                 performances,
                 task,
-                dataset,
-                fold,
+                repo,
                 name,
                 seed,
                 filename_suffix=f"-{time_weight:.2f}",
             )
-    elif name == "GES":
-        # Ensure correct weights to avoid pollution from other tests
-        ensemble.time_weight = 0.0
-        ensemble.loss_weight = 1.0
-        ensemble.ensemble_fit(predictions_val, y_val)
-        performances = process_ges_iterations(
-            ensemble,
-            predictions_val,
-            predictions_test,
-            y_val,
-            y_test,
-            number_of_classes,
-            name_prefix="GES",
-        )
-        save_performances(
-            performances,
-            task,
-            dataset,
-            fold,
-            name,
-            seed,
-        )
     elif isinstance(ensemble, QDOEnsembleSelection):
         ensemble.ensemble_fit(predictions_val, y_val)
         performances = process_qdo_ensemble(
@@ -305,14 +292,13 @@ def evaluate_ensemble(
             predictions_test,
             y_val,
             y_test,
-            number_of_classes,
             name,
+            metric,
         )
         save_performances(
             performances,
             task,
-            dataset,
-            fold,
+            repo,
             name,
             seed,
         )
@@ -326,13 +312,17 @@ def process_ges_iterations(
     predictions_test,
     y_val,
     y_test,
-    number_of_classes,
+    metric: AbstractMetric,
     name_prefix,
     time_weight=None,
+    task=None,  # ! TMP: Pass task for context
 ):
     indices_so_far = []
     index_counts = Counter()
     performances = []
+    single_best_model_name = None
+    single_best_loaded = False
+
     for idx in ensemble.indices_:
         indices_so_far.append(idx)
         index_counts.update([idx])
@@ -342,17 +332,17 @@ def process_ges_iterations(
         for index, count in index_counts.items():
             ensemble.weights_[index] = count / len(indices_so_far)
 
-        # Removed the selection of predictions; use full predictions instead
+        # Compute performance
         roc_auc_val, roc_auc_test = compute_performance(
             ensemble,
+            metric,
             predictions_val,
             predictions_test,
             y_val,
             y_test,
-            number_of_classes,
         )
 
-        # Adjust the performance dictionary accordingly
+        # Prepare performance dictionary
         perf_dict = {
             "name": f"{name_prefix}_{len(indices_so_far)}",
             "iteration": len(indices_so_far),
@@ -364,6 +354,32 @@ def process_ges_iterations(
         if time_weight is not None:
             perf_dict["time_weight"] = time_weight
         performances.append(perf_dict)
+
+        # On the first iteration, compare GES first pick with single-best
+        if len(indices_so_far) == 1 and not single_best_loaded:
+            # Load single-best model name from file
+            try:
+                seed_path = "results/seed_0"
+                single_best_filename = f"{seed_path}/SINGLE_BEST_{task}.json"
+                if os.path.exists(single_best_filename):
+                    single_best_df = pd.read_json(single_best_filename)
+                    single_best_model_name = single_best_df["models_used"].iloc[0][0]
+                    ges_first_model_name = ensemble.base_models[idx].name
+                    if single_best_model_name != ges_first_model_name:
+                        warning_message = (
+                            f"WARNING: For task '{task}', GES did not select the best model first.\n"
+                            f"Single-best model name: '{single_best_model_name}'\n"
+                            f"GES first model name: '{ges_first_model_name}'"
+                        )
+                        print(warning_message)
+                else:
+                    print(
+                        f"Single-best result file not found for task {task} at {single_best_filename}"
+                    )
+            except Exception as e:
+                print(f"Could not load single-best model for task {task}: {e}")
+            single_best_loaded = True  # Ensure we only load once
+
     return performances
 
 
@@ -373,8 +389,8 @@ def process_qdo_ensemble(
     predictions_test,
     y_val,
     y_test,
-    number_of_classes,
     name,
+    metric: AbstractMetric,
 ):
     solutions = [np.array(e.sol) for e in ensemble.archive]
     unique_solutions = {tuple(sol) for sol in solutions}
@@ -383,11 +399,11 @@ def process_qdo_ensemble(
         ensemble.weights_ = np.array(solution)
         roc_auc_val, roc_auc_test = compute_performance(
             ensemble,
+            metric,
             predictions_val,
             predictions_test,
             y_val,
             y_test,
-            number_of_classes,
         )
 
         weight_indices = np.where(ensemble.weights_ != 0)[0]
@@ -403,28 +419,22 @@ def process_qdo_ensemble(
 
 
 def compute_performance(
-    ensemble, predictions_val, predictions_test, y_val, y_test, number_of_classes
+    ensemble, metric: AbstractMetric, predictions_val, predictions_test, y_val, y_test
 ):
     y_pred_val = ensemble.ensemble_predict_proba(predictions_val)
     y_pred_test = ensemble.ensemble_predict_proba(predictions_test)
-    if number_of_classes == 2:
-        y_pred_val = y_pred_val[:, 1]
-        y_pred_test = y_pred_test[:, 1]
-
-    roc_auc_val = roc_auc_score(y_val, y_pred_val, multi_class="ovr", average="macro")
-    roc_auc_test = roc_auc_score(
-        y_test, y_pred_test, multi_class="ovr", average="macro"
-    )
+    roc_auc_val = metric(y_val, y_pred_val, to_loss=True)
+    roc_auc_test = metric(y_test, y_pred_test, to_loss=True)
     return roc_auc_val, roc_auc_test
 
 
 def save_performances(
-    performances, task, dataset, fold, name, seed, filename_suffix=""
+    performances, task, repo: EvaluationRepository, name, seed, filename_suffix=""
 ):
     performance_df = pd.DataFrame(performances)
     performance_df["task"] = task
-    performance_df["dataset"] = dataset
-    performance_df["fold"] = fold
+    performance_df["dataset"] = repo.task_to_dataset(task)
+    performance_df["fold"] = repo.task_to_fold(task)
     performance_df["method"] = name
     if not os.path.exists(f"results/seed_{seed}"):
         os.makedirs(f"results/seed_{seed}")
@@ -451,11 +461,8 @@ def initialize_tasks(repo, datasets, folds) -> list[str]:
 
 
 def load_and_process_base_models(
-    metrics, repo, task, configs, all_config_hyperparameters
+    metrics, repo, dataset, fold, configs, all_config_hyperparameters
 ):
-    dataset = repo.task_to_dataset(task)
-    fold = repo.task_to_fold(task)
-
     dataset_fold_metrics = metrics.loc[(dataset, fold)]
     average_time_infer = dataset_fold_metrics["time_infer_s"].mean()
     average_time_train = dataset_fold_metrics["time_train_s"].mean()
@@ -498,7 +505,7 @@ def load_and_process_base_models(
             repo.predict_test(dataset=dataset, fold=fold, config=config)
         )
         memory_used = df_usage_measurements.loc[
-            df_usage_measurements["Model"] == config_key, "Memory"
+            df_usage_measurements["Model"] == config_key, "Inference_Memory_Usage"
         ].values[0]
         disk_space_used = df_usage_measurements.loc[
             df_usage_measurements["Model"] == config_key, "Models_Size"
@@ -522,55 +529,48 @@ def load_and_process_base_models(
 
         base_models.append(model)
 
+    predictions_val = np.array(predictions_val)
+    predictions_test = np.array(predictions_test)
+    if int(repo.dataset_metadata(dataset=dataset)["NumberOfClasses"]) == 2:
+        predictions_val = expand_binary_predictions(predictions_val)
+        predictions_test = expand_binary_predictions(predictions_test)
+
     return base_models, predictions_val, predictions_test
 
 
 def evaluate_single_best_model(
-    ensemble: list[FakedFittedAndValidatedClassificationBaseModel],
+    base_models: list[FakedFittedAndValidatedClassificationBaseModel],
     repo: EvaluationRepository,
     task: str,
+    metric: AbstractMetric,
+    predictions_val,
+    predictions_test,
+    y_val,
+    y_test,
     seed: int = 1,
 ):
     dataset = repo.task_to_dataset(task)
     fold = repo.task_to_fold(task)
-    y_val = repo.labels_val(dataset=dataset, fold=fold)
-    y_test = repo.labels_test(dataset=dataset, fold=fold)
 
-    # Determine which model performs best on the validation data
-    best_score = 0
+    # Initialize best_score to positive infinity since lower loss is better
+    best_score = np.inf
     best_model = None
-    for model in ensemble:
-        model.switch_to_val_simulation()  # Ensure the model returns validation predictions
-        predicted_probs = model.predict_proba(
-            None
-        )  # Since predictions are pre-stored, no need to pass X
-        score = roc_auc_score(
-            y_val, predicted_probs, multi_class="ovr", average="macro"
-        )
-        if score > best_score:
+    best_idx = -1  # Keep track of the index
+
+    for idx in range(len(base_models)):
+        score = metric(y_val, predictions_val[idx], to_loss=True)
+        if score < best_score:
             best_score = score
-            best_model = model
+            best_model = base_models[idx]
+            best_idx = idx  # Update the best index
 
-    # Now evaluate the best model on test data
-    best_model.switch_to_test_simulation()  # Switch to test predictions
-    predicted_probs_test = best_model.predict_proba(
-        None
-    )  # No X needed as predictions are pre-stored
-    test_score = roc_auc_score(
-        y_test, predicted_probs_test, multi_class="ovr", average="macro"
-    )
-
-    # Also on validation data
-    best_model.switch_to_val_simulation()
-    predicted_probs_val = best_model.predict_proba(None)
-    val_score = roc_auc_score(
-        y_val, predicted_probs_val, multi_class="ovr", average="macro"
-    )
+    # Use the best index to get the test score
+    test_score = metric(y_test, predictions_test[best_idx], to_loss=True)
 
     # Creating performance dictionary and saving to DataFrame
     performance_dict = {
         "name": "SINGLE_BEST",
-        "roc_auc_val": val_score,
+        "roc_auc_val": best_score,
         "roc_auc_test": test_score,
         "task_id": task.split("_")[0],
         "fold": fold,
@@ -579,9 +579,11 @@ def evaluate_single_best_model(
         "method": "SINGLE_BEST",
     }
 
-    performance_df = pd.DataFrame([performance_dict])  # Convert dict to DataFrame
+    performance_df = pd.DataFrame([performance_dict])
     performance_df["dataset"] = dataset
     performance_df["method"] = "SINGLE_BEST"
+    performance_df["task"] = task
+    performance_df["fold"] = fold
 
     # Check and create directory if needed
     result_path = f"results/seed_{seed}"
@@ -605,7 +607,7 @@ def main(
     run_disk_qdo: bool = False,
 ):
     # Define the context for the ensemble evaluation
-    context_name = "D244_F3_C1530_10"
+    context_name = "D244_F3_C1530_100"
     # Load the repository with the specified context
     repo: EvaluationRepository = load_repository(context_name, cache=True)
     # Load the data
@@ -622,35 +624,49 @@ def main(
             f"Task {i+1}/{len(tasks)}: {task}, time for last task: {time.time() - current_time:.2f} s"
         )
         current_time = time.time()
-        base_models, predictions_val, predictions_test = load_and_process_base_models(
-            metrics, repo, task, configs, all_config_hyperparameters
-        )
 
         # Adjusting the metric based on the task
         dataset = repo.task_to_dataset(task)
+        fold = repo.task_to_fold(task)
+        base_models, predictions_val, predictions_test = load_and_process_base_models(
+            metrics, repo, dataset, fold, configs, all_config_hyperparameters
+        )
+        y_test = repo.labels_test(dataset=dataset, fold=fold)
+        y_val = repo.labels_val(dataset=dataset, fold=fold)
+
         task_type = repo.dataset_metadata(dataset=dataset)["task_type"]
+
+        if task_type != "Supervised Classification":
+            continue  # Only support classification for now
+
         number_of_classes = int(
             repo.dataset_metadata(dataset=dataset)["NumberOfClasses"]
-        )  # 0 for regression
-        if task_type == "Supervised Classification":
-            is_binary = number_of_classes == 2
-            metric_name = "roc_auc"
-            labels = list(range(number_of_classes))
-        elif task_type == "Supervised Regression":
-            continue  # Skip regression tasks for now
-        else:
-            raise ValueError(f"Unknown task type: {task_type}")
+        )
+        labels = list(range(number_of_classes))
+        metric = msc(
+            metric_name="roc_auc", is_binary=(number_of_classes == 2), labels=labels
+        )
 
         # Single best model evaluation
         if run_singleBest:
-            evaluate_single_best_model(base_models, repo, task, seed=random_seed)
+            evaluate_single_best_model(
+                base_models,
+                repo,
+                task,
+                metric,
+                predictions_val,
+                predictions_test,
+                y_val,
+                y_test,
+                seed=random_seed,
+            )
 
         # GES evaluation
         if run_ges:
             ges = EnsembleSelection(
                 base_models=base_models,
                 n_iterations=100,
-                metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
+                metric=metric,
                 random_state=random_seed,
             )
             evaluate_ensemble(
@@ -660,6 +676,9 @@ def main(
                 task,
                 predictions_val,
                 predictions_test,
+                y_val,
+                y_test,
+                metric,
                 seed=random_seed,
             )
         # Multi-GES evaluation
@@ -667,7 +686,7 @@ def main(
             multi_ges = EnsembleSelection(
                 base_models=base_models,
                 n_iterations=100,
-                metric=msc(metric_name=metric_name, is_binary=is_binary, labels=labels),
+                metric=metric,
                 random_state=random_seed,
             )
             evaluate_ensemble(
@@ -677,6 +696,9 @@ def main(
                 task,
                 predictions_val,
                 predictions_test,
+                y_val,
+                y_test,
+                metric,
                 seed=random_seed,
             )
         # QO evaluation
@@ -684,9 +706,7 @@ def main(
             qo = QDOEnsembleSelection(
                 base_models=base_models,
                 n_iterations=3,
-                score_metric=msc(
-                    metric_name=metric_name, is_binary=is_binary, labels=labels
-                ),
+                score_metric=metric,
                 random_state=random_seed,
                 archive_type="quality",
             )
@@ -697,6 +717,9 @@ def main(
                 task,
                 predictions_val,
                 predictions_test,
+                y_val,
+                y_test,
+                metric,
                 seed=random_seed,
             )
 
@@ -705,9 +728,7 @@ def main(
             qdo = QDOEnsembleSelection(
                 base_models=base_models,
                 n_iterations=3,
-                score_metric=msc(
-                    metric_name=metric_name, is_binary=is_binary, labels=labels
-                ),
+                score_metric=metric,
                 random_state=random_seed,
                 behavior_space=get_bs_configspace_similarity_and_loss_correlation(),
             )
@@ -718,6 +739,9 @@ def main(
                 task,
                 predictions_val,
                 predictions_test,
+                y_val,
+                y_test,
+                metric,
                 seed=random_seed,
             )
 
@@ -729,9 +753,7 @@ def main(
             infer_time_qdo = QDOEnsembleSelection(
                 base_models=base_models,
                 n_iterations=3,
-                score_metric=msc(
-                    metric_name=metric_name, is_binary=is_binary, labels=labels
-                ),
+                score_metric=metric,
                 random_state=random_seed,
                 behavior_space=get_custom_behavior_space_with_inference_time(
                     max_possible_ensemble_infer_time
@@ -745,6 +767,9 @@ def main(
                 task,
                 predictions_val,
                 predictions_test,
+                y_val,
+                y_test,
+                metric,
                 seed=random_seed,
             )
 
@@ -753,9 +778,7 @@ def main(
             ens_size_qdo = QDOEnsembleSelection(
                 base_models=base_models,
                 n_iterations=3,
-                score_metric=msc(
-                    metric_name=metric_name, is_binary=is_binary, labels=labels
-                ),
+                score_metric=metric,
                 random_state=random_seed,
                 behavior_space=get_bs_ensemble_size_and_loss_correlation(),
             )
@@ -766,6 +789,9 @@ def main(
                 task,
                 predictions_val,
                 predictions_test,
+                y_val,
+                y_test,
+                metric,
                 seed=random_seed,
             )
 
@@ -777,9 +803,7 @@ def main(
             memory_qdo = QDOEnsembleSelection(
                 base_models=base_models,
                 n_iterations=3,
-                score_metric=msc(
-                    metric_name=metric_name, is_binary=is_binary, labels=labels
-                ),
+                score_metric=metric,
                 random_state=random_seed,
                 behavior_space=get_custom_behavior_space_with_memory_usage(
                     max_possible_ensemble_memory_usage
@@ -793,6 +817,9 @@ def main(
                 task,
                 predictions_val,
                 predictions_test,
+                y_val,
+                y_test,
+                metric,
                 seed=random_seed,
             )
 
@@ -804,9 +831,7 @@ def main(
             disk_qdo = QDOEnsembleSelection(
                 base_models=base_models,
                 n_iterations=3,
-                score_metric=msc(
-                    metric_name=metric_name, is_binary=is_binary, labels=labels
-                ),
+                score_metric=metric,
                 random_state=random_seed,
                 behavior_space=get_custom_behavior_space_with_disk_usage(
                     max_possible_ensemble_disk_usage
@@ -820,6 +845,9 @@ def main(
                 task,
                 predictions_val,
                 predictions_test,
+                y_val,
+                y_test,
+                metric,
                 seed=random_seed,
             )
 
@@ -830,9 +858,9 @@ if __name__ == "__main__":
         args.seed,
         run_singleBest=True,
         run_ges=True,
-        run_multi_ges=True,
+        run_multi_ges=False,
         run_qo=False,
-        run_qdo=True,
+        run_qdo=False,
         run_infer_time_qdo=False,
         run_ens_size_qdo=False,
         run_memory_qdo=False,

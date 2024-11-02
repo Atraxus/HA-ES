@@ -16,13 +16,11 @@ conda activate haes
 
 # Counter passed directly to the script
 SEED=${SEED:-0}
-TIME=$(date +"%Y%m%d_%T")
-FILENAME="${SEED}_${TIME}.txt"
 
 echo "Starting job with seed $SEED"
 
 # Executing the Python script with the specified counter
-python haes/generate_data.py --seed $SEED >> $FILENAME 2>&1
+python haes/generate_data.py --seed $SEED
 
 # Deactivate the Conda environment
 conda deactivate
