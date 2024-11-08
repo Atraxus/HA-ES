@@ -89,9 +89,13 @@ def normalize_data(data):
 def normalize_per_dataset(df):
     for task in df["task"].unique():
         mask = df["task"] == task
+        if "roc_auc_val" in df.columns:
+            df.loc[mask, "normalized_roc_auc_val"] = normalize_data(
+                df.loc[mask, "roc_auc_val"]
+            )
         if "roc_auc_test" in df.columns:
-            df.loc[mask, "negated_normalized_roc_auc"] = normalize_data(
-                -df.loc[mask, "roc_auc_test"]
+            df.loc[mask, "normalized_roc_auc_test"] = normalize_data(
+                df.loc[mask, "roc_auc_test"]
             )
         if "inference_time" in df.columns:
             df.loc[mask, "normalized_time"] = normalize_data(
@@ -157,7 +161,7 @@ if __name__ == "__main__":
     repo = load_repository("D244_F3_C1530_100", cache=True)
 
     # Create MULTI_GES method names based on infer_time_weights
-    if True:  # Add multi-ges
+    if False:  # Add multi-ges
         num_solutions = 20
         infer_time_weights = np.linspace(0, 1, num=num_solutions)
         infer_time_weights = np.round(infer_time_weights, 2)
@@ -171,7 +175,7 @@ if __name__ == "__main__":
     method_names = [
         "SINGLE_BEST",
         "GES",
-        "MULTI_GES",
+        # "MULTI_GES",
         # "QO",
         #"QDO",
         # "ENS_SIZE_QDO",
