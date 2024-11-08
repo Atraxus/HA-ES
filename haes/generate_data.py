@@ -273,7 +273,6 @@ def evaluate_ensemble(
                 y_test,
                 metric,
                 name_prefix=f"MULTI_GES_{time_weight:.2f}",
-                time_weight=time_weight,
             )
 
             save_performances(
@@ -315,13 +314,10 @@ def process_ges_iterations(
     metric: AbstractMetric,
     name_prefix,
     time_weight=None,
-    task=None,  # ! TMP: Pass task for context
 ):
     indices_so_far = []
     index_counts = Counter()
     performances = []
-    single_best_model_name = None
-    single_best_loaded = False
 
     for idx in ensemble.indices_:
         indices_so_far.append(idx)
@@ -354,31 +350,6 @@ def process_ges_iterations(
         if time_weight is not None:
             perf_dict["time_weight"] = time_weight
         performances.append(perf_dict)
-
-        # On the first iteration, compare GES first pick with single-best
-        if len(indices_so_far) == 1 and not single_best_loaded:
-            # Load single-best model name from file
-            try:
-                seed_path = "results/seed_0"
-                single_best_filename = f"{seed_path}/SINGLE_BEST_{task}.json"
-                if os.path.exists(single_best_filename):
-                    single_best_df = pd.read_json(single_best_filename)
-                    single_best_model_name = single_best_df["models_used"].iloc[0][0]
-                    ges_first_model_name = ensemble.base_models[idx].name
-                    if single_best_model_name != ges_first_model_name:
-                        warning_message = (
-                            f"WARNING: For task '{task}', GES did not select the best model first.\n"
-                            f"Single-best model name: '{single_best_model_name}'\n"
-                            f"GES first model name: '{ges_first_model_name}'"
-                        )
-                        print(warning_message)
-                else:
-                    print(
-                        f"Single-best result file not found for task {task} at {single_best_filename}"
-                    )
-            except Exception as e:
-                print(f"Could not load single-best model for task {task}: {e}")
-            single_best_loaded = True  # Ensure we only load once
 
     return performances
 
@@ -616,6 +587,10 @@ def main(
     tasks = initialize_tasks(repo, datasets, folds)
 
     metrics = repo.metrics(datasets=datasets, folds=folds, configs=configs)
+    
+    def result_file_exists(method_name, extra_info=""):
+        file_path = f"results/seed_{random_seed}/{method_name}{extra_info}_{task}.json"
+        return os.path.exists(file_path)
 
     # Evaluate ensemble selection methods for each task
     current_time = time.time()
@@ -682,7 +657,10 @@ def main(
                 seed=random_seed,
             )
         # Multi-GES evaluation
-        if run_multi_ges:
+        if run_multi_ges and not all(
+            result_file_exists(f"MULTI_GES-{weight:.2f}")
+            for weight in np.linspace(0, 1, 20)
+        ):
             multi_ges = EnsembleSelection(
                 base_models=base_models,
                 n_iterations=100,
@@ -856,9 +834,9 @@ if __name__ == "__main__":
     args = parse_args()
     main(
         args.seed,
-        run_singleBest=True,
-        run_ges=True,
-        run_multi_ges=False,
+        run_singleBest=False,
+        run_ges=False,
+        run_multi_ges=True,
         run_qo=False,
         run_qdo=False,
         run_infer_time_qdo=False,
