@@ -5,7 +5,7 @@ To evaluate our approach and compare it to the existing algorithms, we use TabRe
 
 
 ## Set-Up
-This set-up guide expects a Linux system. We ran the experiments on Python version 3.10.14. 
+This set-up guide expects a Linux system. Further the code is only tested with Python version 3.10.14.
 
 ### (Optional) Create venv
 It's good practice to use a virtual environment. This isolates your project dependencies from global Python installations. This is how you create a virtual environment in your project directory:

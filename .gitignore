@@ -1,9 +1,12 @@
-plots/scatter/
 results/
+.vscode
+AutogluonModels/
 
 # Json is too large
 data/full.json 
 
+models/
+plots/scatter
 
 
 # Byte-compiled / optimized / DLL files
