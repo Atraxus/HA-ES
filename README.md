@@ -30,5 +30,6 @@ If you use HA-ES in scientific publications, we would appreciate citations.
 Maier, J., Möller, F., & Purucker, L. (2024). Hardware Aware Ensemble Selection for Balancing Predictive Accuracy and Cost. Paper presented at the Third International Conference on Automated Machine Learning (AutoML 2024) Workshop. arXiv. https://arxiv.org/abs/2408.02280
 
 
-I have also written my Master's thesis on this topic: Hardware-Aware Ensemble Selection for Balancing Predictive Accuracy and Operational Costs in AutoML Systems
+I have also written my Master's thesis on this topic: _Hardware-Aware Ensemble Selection for Balancing Predictive Accuracy and Operational Costs in AutoML Systems_
+
 The thesis goes into much more detail and introduces some new methods. I would be happy to provide it to anyone interested. 
