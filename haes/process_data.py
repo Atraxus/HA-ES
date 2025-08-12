@@ -29,44 +29,50 @@ def get_inference_time(entry, repo, metrics):
 
     # Iterate over each configuration in the tuple
     for config in configs:
+        failed = 0
         # Select the metrics for each configuration
         if (dataset, fold, config) in metrics.index:
             selected_metrics = metrics.loc[(dataset, fold, config)]
             # Sum the 'time_infer_s' values for each configuration and add to total
-            total_inference_time += selected_metrics["time_infer_s"].sum()
+            
+            if np.isscalar(selected_metrics["time_infer_s"]):
+                total_inference_time += selected_metrics["time_infer_s"]
+            else:
+                raise ValueError(
+                    f"Parsing failed: expected scalar for 'time_infer_s' but got {type(selected_metrics['time_infer_s'])} "
+                    f"with value: {selected_metrics['time_infer_s']}"
+                )
         else:
+            failed += 1
             total_inference_time += average_time_infer
 
+    if failed > 0:
+        print(f"Failed to retrieve {failed} of {len(configs)} inference time entries and used average of {average_time_infer} instead.")
     return total_inference_time
 
 
-def insert_measurements(df):
-    # Read the CSV file
-    df_usage_measurements = pd.read_csv("data/model_memory_and_disk_usage.csv")
+def compute_total_resource_usage(df, csv_path="data/model_memory_and_disk_usage.csv"):
+    """Compute total memory and diskspace usage for each ensemble in the dataframe."""
+    df_usage = pd.read_csv(csv_path)
+    resource_usage_dict = df_usage.set_index("Model").to_dict("index")
 
-    # Ensure that the 'Model' column is treated as a string
-    df_usage_measurements["Model"] = df_usage_measurements["Model"].astype(str)
+    def get_total_usage(models_used):
+        total_memory = 0
+        total_diskspace = 0
+        for model_name in models_used:
+            model_name_clean = model_name.replace("_BAG_L1", "")
+            if model_name_clean in resource_usage_dict:
+                usage = resource_usage_dict[model_name_clean]
+                total_memory += usage["Inference_Memory_Usage"]
+                total_diskspace += usage["Models_Size"]
+            else:
+                print(f"Warning: Model type '{model_name_clean}' not found in resource usage data.")
+        return pd.Series({"memory": total_memory, "diskspace": total_diskspace})
 
-    # Explode the 'models_used' column to have one model per row
-    df_exploded = df.explode("models_used")
 
-    # Extract 'config_key' by removing the '_BAG_L1' suffix
-    df_exploded["config_key"] = df_exploded["models_used"].str.rsplit("_BAG_L1", n=1).str[0]
-
-    # Merge the exploded DataFrame with the usage measurements
-    df_merged = df_exploded.merge(
-        df_usage_measurements, left_on="config_key", right_on="Model", how="left"
-    )
-
-    # Fill NaN values with 0 for memory and disk space
-    df_merged[["Memory", "Models_Size"]] = df_merged[["Memory", "Models_Size"]].fillna(0)
-
-    # Group by the original index and sum the memory and disk space
-    df_usage = df_merged.groupby(level=0).agg({"Memory": "sum", "Models_Size": "sum"})
-
-    # Assign the aggregated usage data back to the original DataFrame
-    df["memory"] = df_usage["Memory"]
-    df["disk_space"] = df_usage["Models_Size"]
+    # Apply the function to each row in 'df'
+    df[["memory", "diskspace"]] = df["models_used"].apply(get_total_usage)
+    return df
 
 
 def normalize_data(data):
@@ -127,7 +133,7 @@ def parse_dataframes(
         files = [
             f
             for f in os.listdir(filepath)
-            if f.endswith(".json") and any(name + '_' in f for name in method_names)
+            if f.endswith(".json") and any(name + "_" in f for name in method_names)
         ]
         for file in files:
             df = pd.read_json(filepath + file)
@@ -156,7 +162,6 @@ def parse_dataframes(
     return df
 
 
-
 if __name__ == "__main__":
     repo = load_repository("D244_F3_C1530_100", cache=True)
 
@@ -177,11 +182,13 @@ if __name__ == "__main__":
         "GES",
         # "MULTI_GES",
         # "QO",
-        #"QDO",
-        # "ENS_SIZE_QDO",
-        #"INFER_TIME_QDO",
-        # "DISK_QDO",
-        # "MEMORY_QDO",
+        "QDO",
+        "ENS_SIZE_QDO",
+        "INFER_TIME_QDO",
+        "DISK_QDO",
+        "MEMORY_QDO",
+        "MULTI_GES-0.21",
+        "MULTI_GES-0.79",
     ]
 
     # Append the MULTI_GES method names
@@ -192,7 +199,7 @@ if __name__ == "__main__":
         repo=repo,
         method_names=method_names,
     )
-    # insert_measurements(df)
+    compute_total_resource_usage(df)
     normalize_per_dataset(df)
     print(df["method"].unique())
     df.reset_index(drop=True, inplace=True)
@@ -208,13 +215,19 @@ if __name__ == "__main__":
     print(df.head())
 
     # Drop specified columns
-    filtered_data = df[df['method'].isin(method_names)]
-    
-    avg_roc_auc = filtered_data.groupby(['dataset', 'method'])['roc_auc_val'].mean().unstack()
+    filtered_data = df[df["method"].isin(method_names)]
+
+    avg_roc_auc = (
+        filtered_data.groupby(["dataset", "method"])["roc_auc_val"].mean().unstack()
+    )
     print(f"ROC AUC for validation set per method and dataset:\n{avg_roc_auc}\n")
-    avg_roc_auc_test = filtered_data.groupby(['dataset', 'method'])['roc_auc_test'].mean().unstack()
+    avg_roc_auc_test = (
+        filtered_data.groupby(["dataset", "method"])["roc_auc_test"].mean().unstack()
+    )
     print(f"ROC AUC for test set per method and dataset:\n{avg_roc_auc_test}\n")
-    inference_time = filtered_data.groupby(['dataset', 'method'])['inference_time'].mean().unstack()
+    inference_time = (
+        filtered_data.groupby(["dataset", "method"])["inference_time"].mean().unstack()
+    )
     print(f"Inference time per method and dataset:\n{inference_time}\n")
 
     # Total number of entries
@@ -230,5 +243,3 @@ if __name__ == "__main__":
     print(f"Total entries: {total_entries}")
     print(f"Entries with inference time of 0: {zero_infer_count}")
     print(f"Percentage of zero inference times: {percentage_zero:.2f}%")
-
-    # main()
