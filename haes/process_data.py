@@ -29,7 +29,7 @@ def get_inference_time(entry, repo, metrics):
 
     # Iterate over each configuration in the tuple
     for config in configs:
-        failed = 0
+        # failed = 0
         # Select the metrics for each configuration
         if (dataset, fold, config) in metrics.index:
             selected_metrics = metrics.loc[(dataset, fold, config)]
@@ -43,11 +43,11 @@ def get_inference_time(entry, repo, metrics):
                     f"with value: {selected_metrics['time_infer_s']}"
                 )
         else:
-            failed += 1
+            # failed += 1
             total_inference_time += average_time_infer
 
-    if failed > 0:
-        print(f"Failed to retrieve {failed} of {len(configs)} inference time entries and used average of {average_time_infer} instead.")
+    # if failed > 0:
+    #     print(f"Failed to retrieve {failed} of {len(configs)} inference time entries and used average of {average_time_infer} instead.")
     return total_inference_time
 
 
@@ -111,9 +111,9 @@ def normalize_per_dataset(df):
             df.loc[mask, "normalized_memory"] = normalize_data(
                 df.loc[mask, "memory"]  #
             )
-        if "disk_space" in df.columns:
+        if "diskspace" in df.columns:
             df.loc[mask, "normalized_diskspace"] = normalize_data(
-                df.loc[mask, "disk_space"]
+                df.loc[mask, "diskspace"]
             )
 
     return df
@@ -166,7 +166,7 @@ if __name__ == "__main__":
     repo = load_repository("D244_F3_C1530_100", cache=True)
 
     # Create MULTI_GES method names based on infer_time_weights
-    if False:  # Add multi-ges
+    if True:  # Add multi-ges
         num_solutions = 20
         infer_time_weights = np.linspace(0, 1, num=num_solutions)
         infer_time_weights = np.round(infer_time_weights, 2)
@@ -180,15 +180,15 @@ if __name__ == "__main__":
     method_names = [
         "SINGLE_BEST",
         "GES",
-        # "MULTI_GES",
-        # "QO",
-        "QDO",
-        "ENS_SIZE_QDO",
-        "INFER_TIME_QDO",
-        "DISK_QDO",
-        "MEMORY_QDO",
-        "MULTI_GES-0.21",
-        "MULTI_GES-0.79",
+        # # "MULTI_GES",
+        # # "QO",
+        # "QDO",
+        # "ENS_SIZE_QDO",
+        # "INFER_TIME_QDO",
+        # "DISK_QDO",
+        # "MEMORY_QDO",
+        # "MULTI_GES-0.21",
+        # "MULTI_GES-0.79",
     ]
 
     # Append the MULTI_GES method names
@@ -206,8 +206,8 @@ if __name__ == "__main__":
 
     if not os.path.exists("data"):
         os.makedirs("data")
-    df.to_json("data/full.json")
-    print("Done writing data to data/full.json...")
+    # df.to_json("data/full.json")
+    # print("Done writing data to data/full.json...")
     df.to_csv("data/full.csv")
 
     print(f"df shape: {df.shape}")
