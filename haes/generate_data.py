@@ -181,45 +181,6 @@ def get_custom_behavior_space_with_disk_usage(
     return BehaviorSpace([LossCorrelationMeasure, EnsembleDiskUsage])
 
 
-def plot_archive(qdo_es: QDOEnsembleSelection, name: str):
-    # Plot Archive
-    n_elites = len(list(qdo_es.archive))
-    plt.figure(figsize=(8, 6))
-    sliding_boundaries_archive_heatmap(qdo_es.archive, cmap="viridis", square=False)
-    plt.title(f"Final Archive Heatmap (Validation Loss) for {n_elites} elites")
-
-    ax = plt.gca()
-    x_boundary = qdo_es.archive.boundaries[0]
-    y_boundary = qdo_es.archive.boundaries[1]
-    ax.vlines(
-        x_boundary,
-        qdo_es.archive.lower_bounds[1],
-        qdo_es.archive.upper_bounds[1],
-        color="k",
-        linewidth=0.5,
-        alpha=0.5,
-    )
-    ax.hlines(
-        y_boundary,
-        qdo_es.archive.lower_bounds[0],
-        qdo_es.archive.upper_bounds[0],
-        color="k",
-        linewidth=1,
-        alpha=0.5,
-    )
-    ax.set(xlabel="Diversity", ylabel="Inference Time")
-    ax.set_xlim(
-        min(x_boundary) * 0.95,
-        max(x_boundary) * 1.05,
-    )
-    ax.set_ylim(
-        min(y_boundary) * 0.95 - 0.0005,
-        max(y_boundary) * 1.05,
-    )
-
-    plt.savefig(f"archive_plots/{name}.png", dpi=300)
-
-
 def evaluate_ensemble(
     name: str,
     ensemble: EnsembleSelection,
@@ -490,11 +451,11 @@ def load_and_process_base_models(
             model_metadata={
                 "fit_time": time_train_s,
                 "test_predict_time": time_infer_s,
-                "val_predict_time": time_infer_s,  #!
+                "val_predict_time": time_infer_s,
                 "memory": memory_used,
                 "diskspace": disk_space_used,
                 "config": config_dict,
-                "auto-sklearn-model": "PLACEHOLDER",  #! What to pick here as equivalent? Is it even used later on?
+                "auto-sklearn-model": "PLACEHOLDER",
             },
         )
 

@@ -19,7 +19,7 @@ def parse_df_filename(filename):
 def get_inference_time(entry, repo, metrics):
     fold = int(entry["fold"])
     dataset = repo.task_to_dataset(entry["task"])
-    configs = entry["models_used"]  # This is a tuple of configurations
+    configs = entry["models_used"]
 
     dataset_fold_metrics = metrics.loc[(dataset, fold)]
     average_time_infer = dataset_fold_metrics["time_infer_s"].mean()
@@ -34,7 +34,7 @@ def get_inference_time(entry, repo, metrics):
         if (dataset, fold, config) in metrics.index:
             selected_metrics = metrics.loc[(dataset, fold, config)]
             # Sum the 'time_infer_s' values for each configuration and add to total
-            
+
             if np.isscalar(selected_metrics["time_infer_s"]):
                 total_inference_time += selected_metrics["time_infer_s"]
             else:
@@ -66,9 +66,10 @@ def compute_total_resource_usage(df, csv_path="data/model_memory_and_disk_usage.
                 total_memory += usage["Inference_Memory_Usage"]
                 total_diskspace += usage["Models_Size"]
             else:
-                print(f"Warning: Model type '{model_name_clean}' not found in resource usage data.")
+                print(
+                    f"Warning: Model type '{model_name_clean}' not found in resource usage data."
+                )
         return pd.Series({"memory": total_memory, "diskspace": total_diskspace})
-
 
     # Apply the function to each row in 'df'
     df[["memory", "diskspace"]] = df["models_used"].apply(get_total_usage)
@@ -148,15 +149,10 @@ def parse_dataframes(
             df_list_seed.append(df)
 
         df_seed = pd.concat(df_list_seed)
-        df_seed["models_used"] = df_seed["models_used"].apply(tuple)
         df_seed["inference_time"] = df_seed.apply(
             get_inference_time, axis=1, args=(repo, metrics)
         )
-
-        # After calculating inference times, convert 'models_used' back to lists:
-        df_seed["models_used"] = df_seed["models_used"].apply(list)
         all_dfs.append(df_seed)
-
     df = pd.concat(all_dfs)
 
     return df
@@ -164,19 +160,8 @@ def parse_dataframes(
 
 if __name__ == "__main__":
     repo = load_repository("D244_F3_C1530_100", cache=True)
-
-    # Create MULTI_GES method names based on infer_time_weights
-    if True:  # Add multi-ges
-        num_solutions = 20
-        infer_time_weights = np.linspace(0, 1, num=num_solutions)
-        infer_time_weights = np.round(infer_time_weights, 2)
-        multi_ges_methods = [
-            f"MULTI_GES-{time_weight:.2f}" for time_weight in infer_time_weights
-        ]
-    else:
-        multi_ges_methods = []  # Empty list if MULTI_GES is not needed
-
-    # Original method names
+    # The following is for selecting specific methods to parses
+    include_multi_ges = True
     method_names = [
         "SINGLE_BEST",
         "GES",
@@ -190,53 +175,45 @@ if __name__ == "__main__":
         # "MULTI_GES-0.21",
         # "MULTI_GES-0.79",
     ]
-
-    # Append the MULTI_GES method names
-    method_names.extend(multi_ges_methods)
-
-    df = parse_dataframes(
-        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-        repo=repo,
-        method_names=method_names,
+    if include_multi_ges:
+        num_solutions = 20
+        infer_time_weights = np.round(np.linspace(0, 1, num=num_solutions), 2)
+        multi_ges_methods = [
+            f"MULTI_GES-{weight:.2f}" for weight in infer_time_weights
+        ]
+        method_names.extend(multi_ges_methods)
+    
+    # Parsing
+    seeds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    df = (
+        parse_dataframes(seeds, repo, method_names)
+        .pipe(compute_total_resource_usage)
+        .pipe(normalize_per_dataset)
+        .reset_index(drop=True)
     )
-    compute_total_resource_usage(df)
-    normalize_per_dataset(df)
-    print(df["method"].unique())
-    df.reset_index(drop=True, inplace=True)
+    print(f"Methods: {df['method'].unique()}")
+    #! There is a quirk here. ROC AUC is already inverted by to generation script to be a loss.
+    # That's why there is no ivnersion happening before the HV calculations. Would be nicer to rename but this is how it grew over time.
 
     if not os.path.exists("data"):
         os.makedirs("data")
-    # df.to_json("data/full.json")
-    # print("Done writing data to data/full.json...")
     df.to_csv("data/full.csv")
 
-    print(f"df shape: {df.shape}")
-    print(df.columns)
-    print(df.head())
+    # Some analysis
+    print(df.info())
 
-    # Drop specified columns
-    filtered_data = df[df["method"].isin(method_names)]
-
-    avg_roc_auc = (
-        filtered_data.groupby(["dataset", "method"])["roc_auc_val"].mean().unstack()
-    )
+    avg_roc_auc = df.groupby(["dataset", "method"])["roc_auc_val"].mean().unstack()
     print(f"ROC AUC for validation set per method and dataset:\n{avg_roc_auc}\n")
     avg_roc_auc_test = (
-        filtered_data.groupby(["dataset", "method"])["roc_auc_test"].mean().unstack()
+        df.groupby(["dataset", "method"])["roc_auc_test"].mean().unstack()
     )
     print(f"ROC AUC for test set per method and dataset:\n{avg_roc_auc_test}\n")
     inference_time = (
-        filtered_data.groupby(["dataset", "method"])["inference_time"].mean().unstack()
+        df.groupby(["dataset", "method"])["inference_time"].mean().unstack()
     )
     print(f"Inference time per method and dataset:\n{inference_time}\n")
-
-    # Total number of entries
     total_entries = df.shape[0]
-
-    # Number of entries with inference_time equal to 0
     zero_infer_count = df[df["inference_time"] == 0].shape[0]
-
-    # Calculate the percentage of zero entries
     percentage_zero = (zero_infer_count / total_entries) * 100
 
     # Print the results
