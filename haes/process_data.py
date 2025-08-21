@@ -184,7 +184,7 @@ if __name__ == "__main__":
         method_names.extend(multi_ges_methods)
     
     # Parsing
-    seeds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    seeds = [0]#, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     df = (
         parse_dataframes(seeds, repo, method_names)
         .pipe(compute_total_resource_usage)
@@ -192,8 +192,8 @@ if __name__ == "__main__":
         .reset_index(drop=True)
     )
     print(f"Methods: {df['method'].unique()}")
-    #! There is a quirk here. ROC AUC is already inverted by to generation script to be a loss.
-    # That's why there is no ivnersion happening before the HV calculations. Would be nicer to rename but this is how it grew over time.
+    #! There is a quirk here. ROC AUC is already inverted by the generation script to be a loss.
+    #! That's why there is no ivnersion happening before the HV calculations. Would be nicer to rename but this is how it grew over time.
 
     if not os.path.exists("data"):
         os.makedirs("data")
