@@ -5,7 +5,7 @@ FROM python:3.9-slim
 WORKDIR /usr/src/app
 
 # Copy the current directory contents into the container at /usr/src/app
-COPY haes/config_stats.py /usr/src/app/
+COPY src/config_stats.py /usr/src/app/
 COPY extern/tabrepo/data/configs /usr/src/app/configs
 
 # Install necessary system dependencies

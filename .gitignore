@@ -6,8 +6,9 @@ AutogluonModels/
 data/full.json 
 
 models/
-plots/scatter
-
+plots/
+data/
+tables/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
