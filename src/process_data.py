@@ -134,7 +134,8 @@ def parse_dataframes(
         files = [
             f
             for f in os.listdir(filepath)
-            if f.endswith(".json") and any(f.startswith(name + "_") for name in method_names)
+            if f.endswith(".json")
+            and any(f.startswith(name + "_") for name in method_names)
         ]
         for file in files:
             df = pd.read_json(filepath + file)
@@ -160,63 +161,55 @@ def parse_dataframes(
 
 if __name__ == "__main__":
     repo = load_repository("D244_F3_C1530_100", cache=True)
-    # The following is for selecting specific methods to parses
-    include_multi_ges = False
-    method_names = [
-        "SINGLE_BEST",
-        "GES",
-        # # "MULTI_GES",
-        # # "QO",
-        "QDO",
-        "ENS_SIZE_QDO",
-        "INFER_TIME_QDO",
-        "DISK_QDO",
-        "MEMORY_QDO",
-        # "MULTI_GES-0.21",
-        # "MULTI_GES-0.79",
-    ]
-    if include_multi_ges:
-        num_solutions = 20
-        infer_time_weights = np.round(np.linspace(0, 1, num=num_solutions), 2)
-        multi_ges_methods = [
-            f"MULTI_GES-{weight:.2f}" for weight in infer_time_weights
-        ]
-        method_names.extend(multi_ges_methods)
-    
-    # Parsing
-    seeds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-    df = (
-        parse_dataframes(seeds, repo, method_names)
+    seeds = list(range(10))
+
+    # --- Method groups ---
+    base = ["SINGLE_BEST", "GES", "QDO"]
+    ours = ["MEMORY_QDO", "MULTI_GES-0.68"]
+    variants = ["INFER_TIME_QDO", "ENS_SIZE_QDO", "DISK_QDO", "MEMORY_QDO"]
+    extra = ["QO"]
+
+    # All MULTI_GES versions
+    num_solutions = 20
+    infer_time_weights = np.round(np.linspace(0, 1, num=num_solutions), 2)
+    infer_time_weights = np.delete(infer_time_weights, 0)
+    multi_ges_all = [f"MULTI_GES-{w:.2f}" for w in infer_time_weights]
+
+    # --- Parse everything once (raw metrics) ---
+    all_methods = list(set(base + ours + variants + extra + multi_ges_all))
+    df_raw = (
+        parse_dataframes(seeds, repo, all_methods)
         .pipe(compute_total_resource_usage)
-        .pipe(normalize_per_dataset)
         .reset_index(drop=True)
     )
-    print(f"Methods: {df['method'].unique()}")
-    #! There is a quirk here. ROC AUC is already inverted by the generation script to be a loss.
-    #! That's why there is no ivnersion happening before the HV calculations. Would be nicer to rename but this is how it grew over time.
 
     if not os.path.exists("data"):
         os.makedirs("data")
-    df.to_csv("data/full.csv")
 
-    # Some analysis
-    print(df.info())
+    # --- Normalize globally (all methods) ---
+    df_globalnorm = normalize_per_dataset(df_raw)
 
-    avg_roc_auc = df.groupby(["dataset", "method"])["roc_auc_val"].mean().unstack()
-    print(f"ROC AUC for validation set per method and dataset:\n{avg_roc_auc}\n")
-    avg_roc_auc_test = (
-        df.groupby(["dataset", "method"])["roc_auc_test"].mean().unstack()
-    )
-    print(f"ROC AUC for test set per method and dataset:\n{avg_roc_auc_test}\n")
-    inference_time = (
-        df.groupby(["dataset", "method"])["inference_time"].mean().unstack()
-    )
-    print(f"Inference time per method and dataset:\n{inference_time}\n")
-    total_entries = df.shape[0]
-    zero_infer_count = df[df["inference_time"] == 0].shape[0]
-    percentage_zero = (zero_infer_count / total_entries) * 100
+    # --- Save combinations ---
+    filters = {
+        "base_ours": base + ours,
+        "base_variants": base + variants,
+        "base_ours_variants_extra": base + ours + variants + extra,
+        "ges_multi": ["SINGLE_BEST", "GES"] + multi_ges_all,
+    }
 
-    # Print the results
-    print(f"Total entries: {total_entries}")
-    print(f"Entries with inference time of 0: {zero_infer_count}")
-    print(f"Percentage of zero inference times: {percentage_zero:.2f}%")
+    for name, methods in filters.items():
+        # --- Global normalization version ---
+        df_g = df_globalnorm[df_globalnorm["method"].isin(methods)].reset_index(drop=True)
+        df_g.to_csv(f"data/{name}_globalnorm.csv", index=False)
+
+        # --- Local normalization version ---
+        df_l = df_raw[df_raw["method"].isin(methods)].reset_index(drop=True)
+        df_l = normalize_per_dataset(df_l)
+        df_l.to_csv(f"data/{name}_localnorm.csv", index=False)
+
+        print(
+            f"Saved {name}: "
+            f"{df_g['method'].nunique()} methods, "
+            f"{len(df_g)} rows "
+            f"(globalnorm & localnorm)"
+        )

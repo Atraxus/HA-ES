@@ -17,8 +17,8 @@ To activate it use:
 ### Dependencies
 From the project root run the following commands to install the dependencies (`-e` to automatically install changes made to the code of the dependencies)
 - `pip install -r requirements.txt`
-- `python3 -m pip install -e extern/tabrepo`
-- `python3 -m pip install -e extern/phem`
+- `python3 -m pip install extern/tabrepo`
+- `python3 -m pip install extern/phem`
 
 ### Run test
 To run the experiments use
