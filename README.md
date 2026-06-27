@@ -7,22 +7,28 @@ To evaluate our approach and compare it to the existing algorithms, we use TabRe
 ## Set-Up
 This set-up guide expects a Linux system. Further the code is only tested with Python version 3.10.14.
 
+### Get the code
+The dependencies in `extern/` (`tabrepo` and `phem`) are git submodules. If you did not clone the repository with `--recurse-submodules`, initialize them from the project root:
+- `git submodule update --init --recursive`
+
 ### (Optional) Create venv
 It's good practice to use a virtual environment. This isolates your project dependencies from global Python installations. This is how you create a virtual environment in your project directory:
-- `python3 -m venv venv`
+- `python3.10 -m venv venv`
 To activate it use:
 - `source venv/bin/activate`
 
 
 ### Dependencies
-From the project root run the following commands to install the dependencies (`-e` to automatically install changes made to the code of the dependencies)
+From the project root run the following commands to install the dependencies
 - `pip install -r requirements.txt`
-- `python3 -m pip install extern/tabrepo`
-- `python3 -m pip install extern/phem`
+- `pip install -e extern/tabrepo`
+- `pip install extern/phem`
 
 ### Run test
-To run the experiments use
-- `python3 haes/generate_data.py`
+To run the full experiments use
+- `python3 src/generate_data.py`
+
+For a quick test, set `context_name` in `src/generate_data.py` to the smallest context `D244_F3_C1530_3` (3 datasets) before running.
 
 ## Relevant Publication
 If you use HA-ES in scientific publications, we would appreciate citations.

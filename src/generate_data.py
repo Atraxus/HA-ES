@@ -209,7 +209,6 @@ def evaluate_ensemble(
             y_test,
             metric,
             name_prefix="GES",
-            task=task,  # Pass task for context
         )
         save_performances(
             performances,
@@ -539,7 +538,7 @@ def main(
     run_disk_qdo: bool = False,
 ):
     # Define the context for the ensemble evaluation
-    context_name = "D244_F3_C1530_100"
+    context_name = "D244_F3_C1530_3"
     # Load the repository with the specified context
     repo: EvaluationRepository = load_repository(context_name, cache=True)
     # Load the data
@@ -795,13 +794,13 @@ if __name__ == "__main__":
     args = parse_args()
     main(
         args.seed,
-        run_singleBest=False,
-        run_ges=False,
+        run_singleBest=True,
+        run_ges=True,
         run_multi_ges=True,
-        run_qo=False,
-        run_qdo=False,
-        run_infer_time_qdo=False,
-        run_ens_size_qdo=False,
-        run_memory_qdo=False,
-        run_disk_qdo=False,
+        run_qo=True,
+        run_qdo=True,
+        run_infer_time_qdo=True,
+        run_ens_size_qdo=True,
+        run_memory_qdo=True,
+        run_disk_qdo=True,
     )
