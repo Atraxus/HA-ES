@@ -1,37 +1,62 @@
-# HA-ES: Hardware-Aware Ensemble Selection
-One of the concerns with currently existing ensemble selection algorithms is the size of the ensemble, which can affect the inference speed of the trained model. To address this issue, we introduce our novel approach: hardware-aware ensemble selection (HA-ES), which focuses on finding a balance in the performance and complexity trade-off inherent in ensembling.
+# HAPEns: Hardware-Aware Post-Hoc Ensembling
+Ensembling is commonly used in machine learning on tabular data to boost predictive performance and robustness, but larger ensembles often lead to increased hardware demand. HAPEns is a post-hoc ensembling method that explicitly balances accuracy against hardware efficiency. Inspired by multi-objective and quality diversity optimization, HAPEns constructs a diverse set of ensembles along the Pareto front of predictive performance and resource usage, from which practitioners can select the ensemble that fits their deployment constraints. HAPEns extends our earlier work on hardware-aware ensemble selection (HA-ES).
 
-To evaluate our approach and compare it to the existing algorithms, we use TabRepo, which provides prediction probabilities for over 100 ML problems. We use this data to efficiently evaluate and compare the ensemble selection techniques.
+HAPEns maintains a population of ensembles in a two-dimensional behavior space spanned by the average loss correlation of the ensemble's base models and a hardware cost metric (memory usage by default). The space is divided into a 7x7 sliding boundaries archive, in which each niche keeps its best ensemble. New ensembles are created from the archive by crossover and mutation. The hardware cost of an ensemble is the sum of the costs of all base models with non-zero weight.
 
+To evaluate HAPEns and compare it to the baselines, we use [TabArena](https://github.com/autogluon/tabarena), which provides cached validation and test prediction probabilities of many tuned model configurations on its curated datasets. We use this data to efficiently evaluate and compare the post-hoc ensembling methods without training any models.
+
+The experiments in the publications below were run on TabRepo, the predecessor of TabArena, with the `D244_F3_C1530_100` context (83 classification datasets, 10 seeds). The TabRepo-based code is available in the git history (commit `e3fab45`). TabArena contains fewer, curated datasets (38 classification datasets) and different model configurations, so results obtained with this version are not directly comparable to the published ones.
+
+## Methods
+`src/generate_data.py` evaluates the following methods on the ROC AUC. Results are stored under their ID.
+
+| ID | Name in the paper | Method |
+| --- | --- | --- |
+| `MEMORY_QDO` | HAPEns | Quality diversity optimization over average loss correlation and memory usage |
+| `SINGLE_BEST` | Single-Best | The single base model with the best validation score |
+| `GES` | GES* | Greedy ensemble selection, returning the ensemble of every iteration |
+| `MULTI_GES-<w>` | Multi-GES(`w`) | GES with a static weighting `w` of inference time against predictive performance; the paper uses `w = 0.68` |
+| `QDO` | QDO-ES | Quality diversity optimization over average loss correlation and config space similarity (not hardware-aware) |
+| `INFER_TIME_QDO`, `DISK_QDO`, `ENS_SIZE_QDO` | Inference Time, Diskspace, Ensemble Size | Ablations of HAPEns with a different cost metric |
+| `QO` | | Quality optimization without a behavior space (not used in the paper) |
+
+The Pareto fronts of the methods are compared with the hypervolume (HV) and IGD+ in `notebooks/plotting.ipynb`, based on the test ROC AUC and the cost metrics normalized per task and seed.
 
 ## Set-Up
-This set-up guide expects a Linux system. Further the code is only tested with Python version 3.10.14.
+This set-up guide expects a Linux system. The project is managed with [uv](https://docs.astral.sh/uv/) and requires Python 3.11 or 3.12.
 
 ### Get the code
-The dependencies in `extern/` (`tabrepo` and `phem`) are git submodules. If you did not clone the repository with `--recurse-submodules`, initialize them from the project root:
+`phem` is a git submodule in `extern/`. If you did not clone the repository with `--recurse-submodules`, initialize it from the project root:
 - `git submodule update --init --recursive`
 
-### (Optional) Create venv
-It's good practice to use a virtual environment. This isolates your project dependencies from global Python installations. This is how you create a virtual environment in your project directory:
-- `python3.10 -m venv venv`
-To activate it use:
-- `source venv/bin/activate`
-
-
 ### Dependencies
-From the project root run the following commands to install the dependencies
-- `pip install -r requirements.txt`
-- `pip install -e extern/tabrepo`
-- `pip install extern/phem`
+From the project root, create the virtual environment in `.venv` and install the locked dependencies (TabArena, AutoGluon and `phem`):
+- `uv sync`
 
-### Run test
-To run the full experiments use
-- `python3 src/generate_data.py`
+To also install the dependencies of the notebooks, use `uv sync --all-groups`.
 
-For a quick test, set `context_name` in `src/generate_data.py` to the smallest context `D244_F3_C1530_3` (3 datasets) before running.
+### TabArena data
+The base models are the configs of the TabArena methods listed in `DEFAULT_METHODS` in `src/tabarena_data.py`. Their processed artifacts (predictions, labels and metrics) are stored in `~/.cache/tabarena` (override with the `TABARENA_CACHE` environment variable). Each method is several GB, so select a subset with `--methods` for a smaller run. Download them once before running the experiments, in particular before starting several runs in parallel:
+- `uv run python src/download_data.py`
 
-## Relevant Publication
-If you use HA-ES in scientific publications, we would appreciate citations.
+The memory and disk usage of each config is not part of TabArena. It is measured on dummy data by
+- `uv run python src/config_stats.py`
+
+which writes `data/model_memory_and_disk_usage.csv`. Configs without a measurement fall back to the median of their model type. The `Dockerfile` runs the same script in a container.
+
+### Run
+To run the experiments for one seed use
+- `uv run python src/generate_data.py --seed 0`
+
+For a quick test, restrict the methods, datasets and folds, e.g.
+- `uv run python src/generate_data.py --methods ExtraTrees --folds 0 --datasets blood-transfusion-service-center`
+
+`single_run_job.sh` and `multiple_runs_job.sh` run seeds 0-9 on a Slurm cluster. Afterwards, `check_results.py` lists missing result files and `src/process_data.py` aggregates the results into `data/`, which the notebooks in `notebooks/` use for plotting.
+
+## Relevant Publications
+If you use HAPEns or HA-ES in scientific publications, we would appreciate citations.
+
+Maier, J., & Purucker, L. (2026). HAPEns: Hardware-Aware Post-Hoc Ensembling for Tabular Data. arXiv. https://arxiv.org/abs/2603.10582
 
 Maier, J., Möller, F., & Purucker, L. (2024). Hardware Aware Ensemble Selection for Balancing Predictive Accuracy and Cost. Paper presented at the Third International Conference on Automated Machine Learning (AutoML 2024) Workshop. arXiv. https://arxiv.org/abs/2408.02280
 

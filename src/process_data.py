@@ -1,8 +1,17 @@
+import argparse
 import re
 import pandas as pd
 import numpy as np
-from tabrepo import load_repository, EvaluationRepository
 import os
+
+from tabarena.repository import EvaluationRepositoryCollection
+
+from tabarena_data import (
+    DEFAULT_METHODS,
+    config_resource_usage,
+    load_repo,
+    load_resource_usage,
+)
 
 
 def parse_df_filename(filename):
@@ -51,24 +60,20 @@ def get_inference_time(entry, repo, metrics):
     return total_inference_time
 
 
-def compute_total_resource_usage(df, csv_path="data/model_memory_and_disk_usage.csv"):
+def compute_total_resource_usage(df, repo: EvaluationRepositoryCollection):
     """Compute total memory and diskspace usage for each ensemble in the dataframe."""
-    df_usage = pd.read_csv(csv_path)
-    resource_usage_dict = df_usage.set_index("Model").to_dict("index")
+    df_usage = load_resource_usage()
+    configs_type = repo.configs_type()
 
     def get_total_usage(models_used):
         total_memory = 0
         total_diskspace = 0
-        for model_name in models_used:
-            model_name_clean = model_name.replace("_BAG_L1", "")
-            if model_name_clean in resource_usage_dict:
-                usage = resource_usage_dict[model_name_clean]
-                total_memory += usage["Inference_Memory_Usage"]
-                total_diskspace += usage["Models_Size"]
-            else:
-                print(
-                    f"Warning: Model type '{model_name_clean}' not found in resource usage data."
-                )
+        for config in models_used:
+            memory, diskspace = config_resource_usage(
+                df_usage, config, configs_type.get(config)
+            )
+            total_memory += memory
+            total_diskspace += diskspace
         return pd.Series({"memory": total_memory, "diskspace": total_diskspace})
 
     # Apply the function to each row in 'df'
@@ -121,9 +126,9 @@ def normalize_per_dataset(df):
 
 
 def parse_dataframes(
-    seeds: list[int], repo: EvaluationRepository, method_names: list[str]
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    metrics = repo.metrics(datasets=repo.datasets(), configs=repo.configs())
+    seeds: list[int], repo: EvaluationRepositoryCollection, method_names: list[str]
+) -> pd.DataFrame:
+    metrics = repo.metrics()
     results_path = "results"
     all_dfs = []
     print("Start data loading...")
@@ -160,8 +165,18 @@ def parse_dataframes(
 
 
 if __name__ == "__main__":
-    repo = load_repository("D244_F3_C1530_100", cache=True)
-    seeds = list(range(10))
+    parser = argparse.ArgumentParser(description="Aggregate the results of generate_data.py.")
+    parser.add_argument(
+        "--methods",
+        nargs="+",
+        default=DEFAULT_METHODS,
+        help="TabArena methods used as base models when generating the results.",
+    )
+    parser.add_argument("--seeds", nargs="+", type=int, default=list(range(10)))
+    args = parser.parse_args()
+
+    repo = load_repo(args.methods)
+    seeds = args.seeds
 
     # --- Method groups ---
     base = ["SINGLE_BEST", "GES", "QDO"]
@@ -179,7 +194,7 @@ if __name__ == "__main__":
     all_methods = list(set(base + ours + variants + extra + multi_ges_all))
     df_raw = (
         parse_dataframes(seeds, repo, all_methods)
-        .pipe(compute_total_resource_usage)
+        .pipe(compute_total_resource_usage, repo)
         .reset_index(drop=True)
     )
 

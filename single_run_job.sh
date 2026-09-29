@@ -8,11 +8,8 @@
 #SBATCH --mem=16GB
 #SBATCH --partition=std
 
-# Load the Anaconda module
-module add anaconda
-
-# Activate the specific Conda environment
-conda activate haes
+# Activate the project environment (created with `uv sync`)
+source .venv/bin/activate
 
 # Counter passed directly to the script
 SEED=${SEED:-0}
@@ -20,7 +17,7 @@ SEED=${SEED:-0}
 echo "Starting job with seed $SEED"
 
 # Executing the Python script with the specified counter
-python haes/generate_data.py --seed $SEED
+python src/generate_data.py --seed $SEED
 
-# Deactivate the Conda environment
-conda deactivate
+# Deactivate the environment
+deactivate

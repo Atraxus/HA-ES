@@ -1,108 +1,64 @@
-import json
+"""Measure inference memory and disk usage of every TabArena config on dummy data.
+
+Writes data/model_memory_and_disk_usage.csv, which generate_data.py and process_data.py read.
+"""
+
+import argparse
 import os
+import shutil
+import tempfile
+import tracemalloc
+from multiprocessing import Process, Queue
+
 import numpy as np
 import pandas as pd
 import psutil
-import tracemalloc
 from autogluon.tabular import TabularPredictor
-from multiprocessing import Process, Queue
 from tqdm import tqdm
 
-# Load the configurations from the JSON files
-config_path = "./extern/tabrepo/data/configs/"
-files = {
-    "xt": "configs_xt.json",
-    "xgboost": "configs_xgboost.json",
-    "tabpfn": "configs_tabpfn.json",
-    "rf": "configs_rf.json",
-    "nn_torch": "configs_nn_torch.json",
-    "lr": "configs_lr.json",
-    "lightgbm": "configs_lightgbm.json",
-    "knn": "configs_knn.json",
-    "ftt": "configs_ftt.json",
-    "fastai": "configs_fastai.json",
-    "catboost": "configs_catboost.json",
-}
+from tabarena_data import DEFAULT_METHODS, RESOURCE_USAGE_PATH, get_context
 
-# Combine configurations into a single dictionary
-raw_hyperparameters = {}
-for model, filename in files.items():
-    with open(os.path.join(config_path, filename), "r") as file:
-        raw_hyperparameters.update(json.load(file))
 
-# Adjust the configurations
-adjusted_hyperparameters = {}
-configs_hps = raw_hyperparameters.copy()
-portfolio_configs = list(raw_hyperparameters.keys())
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Measure memory and disk usage of TabArena configs."
+    )
+    parser.add_argument(
+        "--methods",
+        nargs="+",
+        default=DEFAULT_METHODS,
+        help="TabArena methods whose configs are measured.",
+    )
+    parser.add_argument("--output", default=RESOURCE_USAGE_PATH)
+    return parser.parse_args()
 
-for _config_prio, config in enumerate(portfolio_configs):
-    tabrepo_config_name = config.replace("_BAG_L1", "")
-    new_config = configs_hps[tabrepo_config_name].copy()
-    model_type = new_config.pop("model_type")
-    new_config = new_config["hyperparameters"]
 
-    model_params = {}
-    optimization_params = {}
-    other_params = {}
+def create_dummy_data(num_samples: int = 500, num_features: int = 15):
+    X_dummy = pd.DataFrame(
+        np.random.random((num_samples, num_features)),
+        columns=[f"feature_{i}" for i in range(num_features)],
+    )
+    X_dummy["target"] = np.random.randint(2, size=num_samples)
 
-    for key, value in list(new_config.items()):
-        if key.startswith('model.ft_transformer.'):
-            param_name = key[len('model.ft_transformer.'):]
-            model_params[param_name] = value
-            del new_config[key]
-        elif key.startswith('optimization.'):
-            param_name = key[len('optimization.'):]
-            optimization_params[param_name] = value
-            del new_config[key]
-        else:
-            other_params[key] = value
+    # Split into train and test sets
+    train_data = X_dummy.sample(frac=0.8, random_state=42)
+    test_data = X_dummy.drop(train_data.index)
+    return train_data, test_data
 
-    if model_params:
-        new_config.setdefault('model', {})
-        new_config['model']['ft_transformer'] = model_params
-
-    if optimization_params:
-        new_config.setdefault('optimization', {})
-        new_config['optimization'].update(optimization_params)
-
-    new_config.update(other_params)
-
-    if model_type not in adjusted_hyperparameters:
-        adjusted_hyperparameters[model_type] = []
-    new_config["ag_args"] = new_config.get("ag_args", {})
-    new_config["ag_args"]["priority"] = 0 - _config_prio
-    adjusted_hyperparameters[model_type].append(new_config)
-
-# Create dummy data
-num_samples = 500
-num_features = 15
-X_dummy = pd.DataFrame(
-    np.random.random((num_samples, num_features)),
-    columns=[f"feature_{i}" for i in range(num_features)],
-)
-X_dummy["target"] = np.random.randint(2, size=num_samples)
-
-# Split into train and test sets
-train_data = X_dummy.sample(frac=0.8, random_state=42)
-test_data = X_dummy.drop(train_data.index)
-
-results = []
-portfolio_model_map = []
-for _config_prio, config in enumerate(portfolio_configs):
-    model_type = config.replace("_BAG_L1", "").split("_")[0]
-    portfolio_model_map.append((model_type, config))
-
-portfolio_counter = 0
 
 # Function to measure memory during inference
-def measure_inference_memory(model_name, config, model_id, result_queue):
+def measure_inference_memory(
+    config_name, model_type, hyperparameters, train_data, test_data, result_queue
+):
+    # Each predictor is only needed for the measurement, so it is written to a temporary directory
+    predictor_path = tempfile.mkdtemp(prefix="config_stats_")
     try:
         predictor = TabularPredictor(
-            label="target", problem_type="binary", verbosity=0
+            label="target", problem_type="binary", verbosity=0, path=predictor_path
         )
         predictor.fit(
             train_data=train_data,
-            hyperparameters={f"{model_name}": config},
+            hyperparameters={model_type: [hyperparameters]},
             time_limit=60,
             verbosity=0,
         )
@@ -111,7 +67,7 @@ def measure_inference_memory(model_name, config, model_id, result_queue):
         mem_before = process.memory_info().rss
         tracemalloc.start()
 
-        predictions = predictor.predict(test_data.drop(columns=["target"]))
+        predictor.predict(test_data.drop(columns=["target"]))
 
         current, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
@@ -134,11 +90,9 @@ def measure_inference_memory(model_name, config, model_id, result_queue):
         models_size = sum(os.path.getsize(f) for f in model_files)
         total_deployed_size = predictor_size + learner_size + models_size
 
-        correct_model_name = portfolio_model_map[portfolio_counter][1]
-
         result_queue.put({
-            "Model_ID": model_id,
-            "Model": correct_model_name,
+            "Model": config_name,
+            "Model_Type": model_type,
             "Inference_Memory_Usage": mem_usage_inference,
             "Peak_Memory_During_Inference": peak,
             "Predictor_Size": predictor_size,
@@ -149,48 +103,68 @@ def measure_inference_memory(model_name, config, model_id, result_queue):
 
     except Exception as e:
         result_queue.put({
-            "Model_ID": model_id,
+            "Model": config_name,
             "Error": str(e)
         })
+    finally:
+        shutil.rmtree(predictor_path, ignore_errors=True)
 
-# Incremental saving setup
-save_interval = 10  # Save every 10 models processed
-save_path = "model_memory_and_disk_usage.csv"
 
-# Initialize progress bar
-total_configs = sum(len(configs) for configs in adjusted_hyperparameters.values())
-pbar = tqdm(total=total_configs, desc='Total Progress')
+def main(methods: list[str], save_path: str):
+    # {config_name: {"model_type": ..., "hyperparameters": {...}}}
+    configs_hyperparameters = get_context().load_configs_hyperparameters(
+        methods=methods, download="auto"
+    )
+    train_data, test_data = create_dummy_data()
 
-# Process models
-for model_name, configs in adjusted_hyperparameters.items():
-    for i, config in enumerate(configs):
-        model_id = f"{model_name}_{i}"
-        pbar.set_description(f"Processing {model_id}")
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+
+    # Incremental saving setup
+    save_interval = 10  # Save every 10 models processed
+    results = []
+    pbar = tqdm(total=len(configs_hyperparameters), desc="Total Progress")
+
+    for config_name, config in configs_hyperparameters.items():
+        pbar.set_description(f"Processing {config_name}")
 
         result_queue = Queue()
-        p = Process(target=measure_inference_memory, args=(model_name, config, model_id, result_queue))
+        p = Process(
+            target=measure_inference_memory,
+            args=(
+                config_name,
+                config["model_type"],
+                config["hyperparameters"],
+                train_data,
+                test_data,
+                result_queue,
+            ),
+        )
         p.start()
         p.join()
 
         if not result_queue.empty():
             result = result_queue.get()
             if "Error" in result:
-                print(f"Error with model {model_id}: {result['Error']}")
+                print(f"Error with model {config_name}: {result['Error']}")
             else:
                 results.append(result)
         else:
-            print(f"No result for {model_id}")
+            print(f"No result for {config_name}")
 
-        portfolio_counter += 1
         pbar.update(1)
 
         # Save intermediary results at set intervals
-        if len(results) % save_interval == 0:
+        if results and len(results) % save_interval == 0:
             pd.DataFrame(results).to_csv(save_path, index=False)
 
-# Final save after all processing
-pbar.close()
-pd.DataFrame(results).to_csv(save_path, index=False)
+    # Final save after all processing
+    pbar.close()
+    pd.DataFrame(results).to_csv(save_path, index=False)
 
-# Output the first few rows for debugging purposes
-print(pd.DataFrame(results).head())
+    # Output the first few rows for debugging purposes
+    print(pd.DataFrame(results).head())
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    main(args.methods, args.output)

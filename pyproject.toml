@@ -1,10 +1,38 @@
 [project]
 name = "ha-es"
 version = "0.1.0"
-requires-python = ">=3.10"
-description = "Add your description here"
+requires-python = ">=3.11,<3.13"
+description = "HAPEns: Hardware-aware post-hoc ensembling for tabular data"
 readme = "README.md"
 dependencies = [
-    "memory-profiler>=0.61.0",
-    "pandas>=2.3.1",
+    "tabarena",
+    "bencheval",
+    "phem",
+    # Mirrors tabarena's pin; naming the nightly lets uv pick pre-releases for AutoGluon only.
+    "autogluon.tabular>=1.6.3b20260917,!=1.6.3,<1.7",
+    # phem and its pinned ribs==0.4.0 use NumPy APIs removed in NumPy 2 (np.product, np.trapz)
+    "numpy<2",
+    "pandas",
+    "psutil",
+    "tqdm",
 ]
+
+[dependency-groups]
+notebooks = [
+    "ipykernel",
+    "matplotlib",
+    "seaborn",
+    "autorank",
+    "pygmo",
+    "pymoo",
+    "catboost",
+    "ipywidgets",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+tabarena = { git = "https://github.com/autogluon/tabarena", subdirectory = "packages/tabarena", rev = "52dac56df3504774ffb273f923e31cc28f955291" }
+bencheval = { git = "https://github.com/autogluon/tabarena", subdirectory = "packages/bencheval", rev = "52dac56df3504774ffb273f923e31cc28f955291" }
+phem = { path = "extern/phem", editable = true }

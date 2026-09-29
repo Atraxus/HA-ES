@@ -1,36 +1,28 @@
 import os
 import numpy as np
 import csv
-from tabrepo import load_repository, get_context
+import argparse
+import sys
 
-def load_data(repo, context_name) -> tuple[list[str], list[str], list[int], dict]:
-    context = get_context(name=context_name)
-    all_config_hyperparameters = context.load_configs_hyperparameters()
-    datasets = repo.datasets()
-    configs = repo.configs()
-    folds = [0, 1, 2]
-    return datasets, configs, folds, all_config_hyperparameters
+sys.path.append("src")
+from tabarena_data import (  # noqa: E402
+    DEFAULT_FOLDS,
+    DEFAULT_METHODS,
+    classification_datasets,
+    initialize_tasks,
+    load_repo,
+)
 
+parser = argparse.ArgumentParser(description="List missing result files.")
+parser.add_argument("--methods", nargs="+", default=DEFAULT_METHODS)
+parser.add_argument("--folds", nargs="+", type=int, default=DEFAULT_FOLDS)
+args = parser.parse_args()
 
-def initialize_tasks(repo, datasets, folds) -> list[str]:
-    tasks = [
-        repo.task_name(dataset=dataset, fold=fold)
-        for dataset in datasets
-        for fold in folds
-    ]
-    return tasks
+repo = load_repo(args.methods)
 
-# Define the context for the ensemble evaluation
-context_name = "D244_F3_C1530_100"
-
-# Load the repository with the specified context
-repo = load_repository(context_name, cache=True)
-
-# Load the data
-datasets, configs, folds, all_config_hyperparameters = load_data(repo, context_name)
-
-# Initialize the tasks
-tasks = initialize_tasks(repo, datasets, folds)
+# Only classification is supported for now
+datasets = classification_datasets(repo)
+tasks = initialize_tasks(repo, datasets, args.folds)
 
 # Generate the list of methods
 basic_methods = [
@@ -40,7 +32,7 @@ basic_methods = [
     'ENS_SIZE_QDO',
     'INFER_TIME_QDO',
     'MEMORY_QDO',
-    'DISK_SPACE_QDO',
+    'DISK_QDO',
     'GES',
 ]
 
@@ -61,10 +53,6 @@ for method in methods:
     for seed in seeds:
         seed_dir = os.path.join('results', seed)
         for task in tasks:
-            dataset = repo.task_to_dataset(task)
-            task_type = repo.dataset_metadata(dataset=dataset)["task_type"]
-            if task_type != "Supervised Classification":
-                continue  # Only support classification for now
             filename = f"{method}_{task}.json"
             filepath = os.path.join(seed_dir, filename)
             if not os.path.isfile(filepath):

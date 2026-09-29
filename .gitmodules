@@ -1,6 +1,3 @@
 [submodule "extern/phem"]
 	path = extern/phem
 	url = https://github.com/Atraxus/phem
-[submodule "extern/tabrepo"]
-	path = extern/tabrepo
-	url = https://github.com/autogluon/tabrepo

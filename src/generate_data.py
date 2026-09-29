@@ -1,6 +1,6 @@
 from collections import Counter
 from phem.methods.ensemble_selection.qdo.behavior_space import BehaviorSpace
-from tabrepo import load_repository, EvaluationRepository, get_context
+from tabarena.repository import EvaluationRepositoryCollection
 
 from phem.methods.ensemble_selection import EnsembleSelection
 from phem.methods.ensemble_selection.qdo.behavior_spaces import (
@@ -20,11 +20,20 @@ from dataclasses import dataclass, field
 import os
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from ribs.visualize import sliding_boundaries_archive_heatmap
 
 import time
 import argparse
+
+from tabarena_data import (
+    CLASSIFICATION_PROBLEM_TYPES,
+    DEFAULT_FOLDS,
+    DEFAULT_METHODS,
+    classification_datasets,
+    config_resource_usage,
+    initialize_tasks,
+    load_repo,
+    load_resource_usage,
+)
 
 
 def parse_args():
@@ -33,6 +42,25 @@ def parse_args():
     )
     parser.add_argument(
         "--seed", type=int, default=0, help="Seed for RNG initialization."
+    )
+    parser.add_argument(
+        "--methods",
+        nargs="+",
+        default=DEFAULT_METHODS,
+        help="TabArena methods whose configs are used as base models.",
+    )
+    parser.add_argument(
+        "--folds",
+        nargs="+",
+        type=int,
+        default=DEFAULT_FOLDS,
+        help="TabArena folds (splits) to evaluate per dataset.",
+    )
+    parser.add_argument(
+        "--datasets",
+        nargs="+",
+        default=None,
+        help="Restrict to these datasets (default: all classification datasets).",
     )
     return parser.parse_args()
 
@@ -80,14 +108,6 @@ class FakedFittedAndValidatedClassificationBaseModel:
 
     def switch_to_val_simulation(self):
         self.return_val_data = True
-
-
-def expand_binary_predictions(predictions):
-    # Calculate probabilities for the negative class (class 0)
-    negative_class_probs = 1 - predictions
-    # Stack the negative and positive class probabilities along a new dimension
-    expanded_predictions = np.stack([negative_class_probs, predictions], axis=-1)
-    return expanded_predictions
 
 
 def ensemble_inference_time(input_metadata: list[dict]):
@@ -184,7 +204,7 @@ def get_custom_behavior_space_with_disk_usage(
 def evaluate_ensemble(
     name: str,
     ensemble: EnsembleSelection,
-    repo: EvaluationRepository,
+    repo: EvaluationRepositoryCollection,
     task: str,
     predictions_val: list[np.ndarray],
     predictions_test: list[np.ndarray],
@@ -360,7 +380,7 @@ def compute_performance(
 
 
 def save_performances(
-    performances, task, repo: EvaluationRepository, name, seed, filename_suffix=""
+    performances, task, repo: EvaluationRepositoryCollection, name, seed, filename_suffix=""
 ):
     performance_df = pd.DataFrame(performances)
     performance_df["task"] = task
@@ -373,52 +393,31 @@ def save_performances(
     performance_df.to_json(filename)
 
 
-def load_data(repo, context_name) -> tuple[list[str], list[str], list[int], dict]:
-    context = get_context(name=context_name)
-    all_config_hyperparameters = context.load_configs_hyperparameters()
-    datasets = repo.datasets()
-    configs = repo.configs()
-    folds = [0, 1, 2]
-    return datasets, configs, folds, all_config_hyperparameters
-
-
-def initialize_tasks(repo, datasets, folds) -> list[str]:
-    tasks = [
-        repo.task_name(dataset=dataset, fold=fold)
-        for dataset in datasets
-        for fold in folds
-    ]
-    return tasks
-
-
 def load_and_process_base_models(
-    metrics, repo, dataset, fold, configs, all_config_hyperparameters
+    metrics, repo: EvaluationRepositoryCollection, dataset, fold, df_usage
 ):
-    dataset_fold_metrics = metrics.loc[(dataset, fold)]
-    average_time_infer = dataset_fold_metrics["time_infer_s"].mean()
-    average_time_train = dataset_fold_metrics["time_train_s"].mean()
+    # Only use the configs that have results for this task
+    task_metrics = metrics.loc[(dataset, fold)]
+    configs = list(task_metrics.index)
+
+    # Binary predictions are returned as (n_configs, n_rows, 2) like the multiclass ones
+    predictions_val = repo.predict_val_multi(
+        dataset=dataset, fold=fold, configs=configs, binary_as_multiclass=True
+    )
+    predictions_test = repo.predict_test_multi(
+        dataset=dataset, fold=fold, configs=configs, binary_as_multiclass=True
+    )
 
     # Iterate over each config to create a base model representation
-    df_usage_measurements = pd.read_csv("data/model_memory_and_disk_usage.csv")
     base_models = []
-    predictions_val = []
-    predictions_test = []
-    for config in configs:
-        try:
-            time_infer_s = metrics.loc[(dataset, fold, config), "time_infer_s"]
-            time_train_s = metrics.loc[(dataset, fold, config), "time_train_s"]
-        except KeyError as e:
-            print(f"Error accessing data {e}. Using average...")
-            time_infer_s = average_time_infer
-            time_train_s = average_time_train
+    for i, config in enumerate(configs):
+        time_infer_s = task_metrics.loc[config, "time_infer_s"]
+        time_train_s = task_metrics.loc[config, "time_train_s"]
 
-        config_key = config.rsplit("_BAG_L1", 1)[
-            0
-        ]  # ? Why do they all end with _BAG_L1?
-        config_type = all_config_hyperparameters[config_key]["model_type"]
-        config_hyperparameters = all_config_hyperparameters[config_key][
-            "hyperparameters"
-        ]
+        config_type = repo.config_type(config=config)
+        config_hyperparameters = (
+            repo.config_hyperparameters(config=config, include_ag_args=False) or {}
+        )
         config_dict = {}
         for key, value in config_hyperparameters.items():
             try:
@@ -428,25 +427,15 @@ def load_and_process_base_models(
 
         config_dict["model_type"] = config_type
 
-        # Fetch predictions for each dataset and fold
-        predictions_val.append(
-            repo.predict_val(dataset=dataset, fold=fold, config=config)
+        memory_used, disk_space_used = config_resource_usage(
+            df_usage, config, config_type
         )
-        predictions_test.append(
-            repo.predict_test(dataset=dataset, fold=fold, config=config)
-        )
-        memory_used = df_usage_measurements.loc[
-            df_usage_measurements["Model"] == config_key, "Inference_Memory_Usage"
-        ].values[0]
-        disk_space_used = df_usage_measurements.loc[
-            df_usage_measurements["Model"] == config_key, "Models_Size"
-        ].values[0]
 
         # Wrap predictions in the FakedFittedAndValidatedClassificationBaseModel
         model = FakedFittedAndValidatedClassificationBaseModel(
             name=config,
-            val_probabilities=predictions_val[-1],
-            test_probabilities=predictions_test[-1],
+            val_probabilities=predictions_val[i],
+            test_probabilities=predictions_test[i],
             model_metadata={
                 "fit_time": time_train_s,
                 "test_predict_time": time_infer_s,
@@ -460,18 +449,12 @@ def load_and_process_base_models(
 
         base_models.append(model)
 
-    predictions_val = np.array(predictions_val)
-    predictions_test = np.array(predictions_test)
-    if int(repo.dataset_metadata(dataset=dataset)["NumberOfClasses"]) == 2:
-        predictions_val = expand_binary_predictions(predictions_val)
-        predictions_test = expand_binary_predictions(predictions_test)
-
     return base_models, predictions_val, predictions_test
 
 
 def evaluate_single_best_model(
     base_models: list[FakedFittedAndValidatedClassificationBaseModel],
-    repo: EvaluationRepository,
+    repo: EvaluationRepositoryCollection,
     task: str,
     metric: AbstractMetric,
     predictions_val,
@@ -527,6 +510,9 @@ def evaluate_single_best_model(
 
 def main(
     random_seed: int = 0,
+    methods: list[str] | None = None,
+    folds: list[int] = DEFAULT_FOLDS,
+    datasets: list[str] | None = None,
     run_singleBest: bool = False,
     run_multi_ges: bool = False,
     run_ges: bool = False,
@@ -537,17 +523,15 @@ def main(
     run_memory_qdo: bool = False,
     run_disk_qdo: bool = False,
 ):
-    # Define the context for the ensemble evaluation
-    context_name = "D244_F3_C1530_3"
-    # Load the repository with the specified context
-    repo: EvaluationRepository = load_repository(context_name, cache=True)
-    # Load the data
-    datasets, configs, folds, all_config_hyperparameters = load_data(repo, context_name)
+    repo = load_repo(methods)
+    if datasets is None:
+        datasets = classification_datasets(repo)
     # A task is a fold of a dataset
     tasks = initialize_tasks(repo, datasets, folds)
 
-    metrics = repo.metrics(datasets=datasets, folds=folds, configs=configs)
-    
+    metrics = repo.metrics(datasets=datasets, folds=folds)
+    df_usage = load_resource_usage()
+
     def result_file_exists(method_name, extra_info=""):
         file_path = f"results/seed_{random_seed}/{method_name}{extra_info}_{task}.json"
         return os.path.exists(file_path)
@@ -560,23 +544,20 @@ def main(
         )
         current_time = time.time()
 
-        # Adjusting the metric based on the task
         dataset = repo.task_to_dataset(task)
         fold = repo.task_to_fold(task)
+
+        if repo.dataset_info(dataset=dataset)["problem_type"] not in CLASSIFICATION_PROBLEM_TYPES:
+            continue  # Only support classification for now
+
         base_models, predictions_val, predictions_test = load_and_process_base_models(
-            metrics, repo, dataset, fold, configs, all_config_hyperparameters
+            metrics, repo, dataset, fold, df_usage
         )
         y_test = repo.labels_test(dataset=dataset, fold=fold)
         y_val = repo.labels_val(dataset=dataset, fold=fold)
 
-        task_type = repo.dataset_metadata(dataset=dataset)["task_type"]
-
-        if task_type != "Supervised Classification":
-            continue  # Only support classification for now
-
-        number_of_classes = int(
-            repo.dataset_metadata(dataset=dataset)["NumberOfClasses"]
-        )
+        # Adjusting the metric based on the task
+        number_of_classes = predictions_val.shape[-1]
         labels = list(range(number_of_classes))
         metric = msc(
             metric_name="roc_auc", is_binary=(number_of_classes == 2), labels=labels
@@ -794,6 +775,9 @@ if __name__ == "__main__":
     args = parse_args()
     main(
         args.seed,
+        methods=args.methods,
+        folds=args.folds,
+        datasets=args.datasets,
         run_singleBest=True,
         run_ges=True,
         run_multi_ges=True,
