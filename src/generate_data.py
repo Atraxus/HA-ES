@@ -1,4 +1,13 @@
+import os
+
+# The ensembles of a task are fitted in parallel worker processes (see --n-jobs), so each process
+# must not start its own BLAS/OpenMP thread pool. Set before numpy is imported.
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
 from phem.methods.ensemble_selection.qdo.behavior_space import BehaviorSpace
 from tabarena.repository import EvaluationRepositoryCollection
 
@@ -7,7 +16,6 @@ from phem.methods.ensemble_selection.qdo.behavior_spaces import (
     get_bs_configspace_similarity_and_loss_correlation,
     get_bs_ensemble_size_and_loss_correlation,
 )
-from phem.application_utils.supported_metrics import msc
 from phem.methods.ensemble_selection.qdo.qdo_es import QDOEnsembleSelection
 from phem.methods.ensemble_selection.qdo.behavior_functions.basic import (
     LossCorrelationMeasure,
@@ -17,13 +25,13 @@ from phem.base_utils.metrics import AbstractMetric
 
 from dataclasses import dataclass, field
 
-import os
 import numpy as np
 import pandas as pd
 
 import time
 import argparse
 
+from fast_metrics import FastRocAuc
 from tabarena_data import (
     CLASSIFICATION_PROBLEM_TYPES,
     DEFAULT_FOLDS,
@@ -55,6 +63,21 @@ def parse_args():
         type=int,
         default=DEFAULT_FOLDS,
         help="TabArena folds (splits) to evaluate per dataset.",
+    )
+    parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=len(os.sched_getaffinity(0)),
+        help="Number of ensembles fitted in parallel per task (default: all available CPUs).",
+    )
+    parser.add_argument(
+        "--legacy-multi-ges",
+        action="store_true",
+        help=(
+            "Reproduce the Multi-GES results of the publications: fit all weights with one "
+            "ensemble object, which limits each weight to the best iteration of the previous one "
+            "instead of running 100 iterations per weight."
+        ),
     )
     parser.add_argument(
         "--datasets",
@@ -201,6 +224,10 @@ def get_custom_behavior_space_with_disk_usage(
     return BehaviorSpace([LossCorrelationMeasure, EnsembleDiskUsage])
 
 
+# Static inference time weights of Multi-GES
+MULTI_GES_TIME_WEIGHTS = np.linspace(0, 1, num=20)
+
+
 def evaluate_ensemble(
     name: str,
     ensemble: EnsembleSelection,
@@ -212,6 +239,7 @@ def evaluate_ensemble(
     y_test,
     metric: AbstractMetric,
     seed: int = 1,
+    time_weight: float | None = None,
 ):
     for bm in ensemble.base_models:
         bm.switch_to_val_simulation()
@@ -238,9 +266,14 @@ def evaluate_ensemble(
             seed,
         )
     elif name == "MULTI_GES":
-        num_solutions = 20
-        infer_time_weights = np.linspace(0, 1, num=num_solutions)
-        for time_weight in infer_time_weights:
+        if time_weight is None:
+            # Legacy behavior: all weights are fitted one after another with the same ensemble
+            # object. Each fit reduces the object's number of iterations to its best iteration
+            # (phem's use_best), so every weight is limited by the fits of the previous weights.
+            time_weights = MULTI_GES_TIME_WEIGHTS
+        else:
+            time_weights = [time_weight]
+        for time_weight in time_weights:
             ensemble.time_weight = time_weight
             ensemble.loss_weight = 1 - time_weight
             ensemble.ensemble_fit(predictions_val, y_val)
@@ -372,8 +405,11 @@ def process_qdo_ensemble(
 def compute_performance(
     ensemble, metric: AbstractMetric, predictions_val, predictions_test, y_val, y_test
 ):
-    y_pred_val = ensemble.ensemble_predict_proba(predictions_val)
-    y_pred_test = ensemble.ensemble_predict_proba(predictions_test)
+    # Only pass the predictions of the models in the ensemble; phem then skips the (identical)
+    # contributions of the zero-weight models instead of iterating over all base models
+    used = np.flatnonzero(ensemble.weights_)
+    y_pred_val = ensemble.ensemble_predict_proba(predictions_val[used])
+    y_pred_test = ensemble.ensemble_predict_proba(predictions_test[used])
     roc_auc_val = metric(y_val, y_pred_val, to_loss=True)
     roc_auc_test = metric(y_test, y_pred_test, to_loss=True)
     return roc_auc_val, roc_auc_test
@@ -508,11 +544,100 @@ def evaluate_single_best_model(
     performance_df.to_json(f"{result_path}/SINGLE_BEST_{task}.json")
 
 
+# Data of the current task, set before the worker processes are forked so that they share it
+_task_data: dict = {}
+
+
+def _build_ensemble(method: str, base_models, metric, random_seed: int):
+    """Create the ensemble method `method`. phem's own multiprocessing is disabled (n_jobs=1)
+    because the ensembles of a task are already fitted in parallel."""
+    if method in ("GES", "MULTI_GES"):
+        return EnsembleSelection(
+            base_models=base_models,
+            n_iterations=100,
+            metric=metric,
+            random_state=random_seed,
+            n_jobs=1,
+        )
+
+    qdo_kwargs = dict(
+        base_models=base_models,
+        n_iterations=3,
+        score_metric=metric,
+        random_state=random_seed,
+        n_jobs=1,
+    )
+    if method == "QO":
+        return QDOEnsembleSelection(archive_type="quality", **qdo_kwargs)
+    if method == "QDO":
+        return QDOEnsembleSelection(
+            behavior_space=get_bs_configspace_similarity_and_loss_correlation(),
+            **qdo_kwargs,
+        )
+    if method == "ENS_SIZE_QDO":
+        return QDOEnsembleSelection(
+            behavior_space=get_bs_ensemble_size_and_loss_correlation(), **qdo_kwargs
+        )
+
+    # QDO with a hardware cost metric and loss correlation
+    cost_behavior_spaces = {
+        "INFER_TIME_QDO": ("test_predict_time", get_custom_behavior_space_with_inference_time),
+        "MEMORY_QDO": ("memory", get_custom_behavior_space_with_memory_usage),
+        "DISK_QDO": ("diskspace", get_custom_behavior_space_with_disk_usage),
+    }
+    metadata_key, get_behavior_space = cost_behavior_spaces[method]
+    max_possible_ensemble_cost = sum(bm.model_metadata[metadata_key] for bm in base_models)
+    return QDOEnsembleSelection(
+        behavior_space=get_behavior_space(max_possible_ensemble_cost),
+        base_models_metadata_type="custom",
+        **qdo_kwargs,
+    )
+
+
+def _run_job(job: tuple[str, float | None]):
+    method, time_weight = job
+    d = _task_data
+    ensemble = _build_ensemble(method, d["base_models"], d["metric"], d["seed"])
+    evaluate_ensemble(
+        method,
+        ensemble,
+        d["repo"],
+        d["task"],
+        d["predictions_val"],
+        d["predictions_test"],
+        d["y_val"],
+        d["y_test"],
+        d["metric"],
+        seed=d["seed"],
+        time_weight=time_weight,
+    )
+    return method if time_weight is None else f"{method}-{time_weight:.2f}"
+
+
+def _warm_up_jit(base_models, predictions_val, y_val, metric):
+    """Compile the numba functions of the QDO archives once in the main process.
+
+    Forked workers inherit the compiled functions; otherwise every worker compiles them again for
+    every task (~3 s per QDO fit). Uses a small fit on a subset of the base models with both
+    archive types used by the experiments.
+    """
+    n = min(len(base_models), 20)
+    kwargs = dict(
+        base_models=base_models[:n], n_iterations=3, score_metric=metric, random_state=0, n_jobs=1
+    )
+    QDOEnsembleSelection(archive_type="quality", **kwargs).ensemble_fit(predictions_val[:n], y_val)
+    QDOEnsembleSelection(
+        behavior_space=get_bs_ensemble_size_and_loss_correlation(), **kwargs
+    ).ensemble_fit(predictions_val[:n], y_val)
+
+
 def main(
     random_seed: int = 0,
     methods: list[str] | None = None,
     folds: list[int] = DEFAULT_FOLDS,
     datasets: list[str] | None = None,
+    n_jobs: int = 1,
+    legacy_multi_ges: bool = False,
     run_singleBest: bool = False,
     run_multi_ges: bool = False,
     run_ges: bool = False,
@@ -536,11 +661,35 @@ def main(
         file_path = f"results/seed_{random_seed}/{method_name}{extra_info}_{task}.json"
         return os.path.exists(file_path)
 
+    # Ensemble methods to fit per task: (method, Multi-GES time weight). GES first, as it takes longest.
+    jobs = []
+    if run_ges:
+        jobs.append(("GES", None))
+    if run_multi_ges:
+        if legacy_multi_ges:
+            # One job fitting all weights sequentially (time_weight=None)
+            jobs.append(("MULTI_GES", None))
+        else:
+            jobs += [("MULTI_GES", time_weight) for time_weight in MULTI_GES_TIME_WEIGHTS]
+    for method, run in [
+        ("QO", run_qo),
+        ("QDO", run_qdo),
+        ("INFER_TIME_QDO", run_infer_time_qdo),
+        ("ENS_SIZE_QDO", run_ens_size_qdo),
+        ("MEMORY_QDO", run_memory_qdo),
+        ("DISK_QDO", run_disk_qdo),
+    ]:
+        if run:
+            jobs.append((method, None))
+
+    jit_warmed_up = False
+
     # Evaluate ensemble selection methods for each task
     current_time = time.time()
     for i, task in enumerate(tasks):
         print(
-            f"Task {i+1}/{len(tasks)}: {task}, time for last task: {time.time() - current_time:.2f} s"
+            f"Task {i+1}/{len(tasks)}: {task}, time for last task: {time.time() - current_time:.2f} s",
+            flush=True,
         )
         current_time = time.time()
 
@@ -559,9 +708,7 @@ def main(
         # Adjusting the metric based on the task
         number_of_classes = predictions_val.shape[-1]
         labels = list(range(number_of_classes))
-        metric = msc(
-            metric_name="roc_auc", is_binary=(number_of_classes == 2), labels=labels
-        )
+        metric = FastRocAuc(is_binary=(number_of_classes == 2), labels=labels)
 
         # Single best model evaluation
         if run_singleBest:
@@ -577,198 +724,46 @@ def main(
                 seed=random_seed,
             )
 
-        # GES evaluation
-        if run_ges:
-            ges = EnsembleSelection(
-                base_models=base_models,
-                n_iterations=100,
-                metric=metric,
-                random_state=random_seed,
+        # Multi-GES is skipped if all its results already exist
+        task_jobs = [
+            job
+            for job in jobs
+            if not (
+                job[0] == "MULTI_GES"
+                and all(result_file_exists(f"MULTI_GES-{w:.2f}") for w in MULTI_GES_TIME_WEIGHTS)
             )
-            evaluate_ensemble(
-                "GES",
-                ges,
-                repo,
-                task,
-                predictions_val,
-                predictions_test,
-                y_val,
-                y_test,
-                metric,
-                seed=random_seed,
-            )
-        # Multi-GES evaluation
-        if run_multi_ges and not all(
-            result_file_exists(f"MULTI_GES-{weight:.2f}")
-            for weight in np.linspace(0, 1, 20)
-        ):
-            multi_ges = EnsembleSelection(
-                base_models=base_models,
-                n_iterations=100,
-                metric=metric,
-                random_state=random_seed,
-            )
-            evaluate_ensemble(
-                "MULTI_GES",
-                multi_ges,
-                repo,
-                task,
-                predictions_val,
-                predictions_test,
-                y_val,
-                y_test,
-                metric,
-                seed=random_seed,
-            )
-        # QO evaluation
-        if run_qo:
-            qo = QDOEnsembleSelection(
-                base_models=base_models,
-                n_iterations=3,
-                score_metric=metric,
-                random_state=random_seed,
-                archive_type="quality",
-            )
-            evaluate_ensemble(
-                "QO",
-                qo,
-                repo,
-                task,
-                predictions_val,
-                predictions_test,
-                y_val,
-                y_test,
-                metric,
-                seed=random_seed,
-            )
+        ]
+        if not task_jobs:
+            continue
 
-        # QDO evaluation
-        if run_qdo:
-            qdo = QDOEnsembleSelection(
-                base_models=base_models,
-                n_iterations=3,
-                score_metric=metric,
-                random_state=random_seed,
-                behavior_space=get_bs_configspace_similarity_and_loss_correlation(),
-            )
-            evaluate_ensemble(
-                "QDO",
-                qdo,
-                repo,
-                task,
-                predictions_val,
-                predictions_test,
-                y_val,
-                y_test,
-                metric,
-                seed=random_seed,
-            )
+        if not jit_warmed_up and n_jobs > 1:
+            _warm_up_jit(base_models, predictions_val, y_val, metric)
+            jit_warmed_up = True
 
-        # QDO evaluation with inference time and loss correlation
-        if run_infer_time_qdo:
-            max_possible_ensemble_infer_time = sum(
-                [bm.model_metadata["test_predict_time"] for bm in base_models],
-            )
-            infer_time_qdo = QDOEnsembleSelection(
-                base_models=base_models,
-                n_iterations=3,
-                score_metric=metric,
-                random_state=random_seed,
-                behavior_space=get_custom_behavior_space_with_inference_time(
-                    max_possible_ensemble_infer_time
-                ),
-                base_models_metadata_type="custom",
-            )
-            evaluate_ensemble(
-                "INFER_TIME_QDO",
-                infer_time_qdo,
-                repo,
-                task,
-                predictions_val,
-                predictions_test,
-                y_val,
-                y_test,
-                metric,
-                seed=random_seed,
-            )
-
-        # QDO evaluation with ensemble size and loss correlation
-        if run_ens_size_qdo:
-            ens_size_qdo = QDOEnsembleSelection(
-                base_models=base_models,
-                n_iterations=3,
-                score_metric=metric,
-                random_state=random_seed,
-                behavior_space=get_bs_ensemble_size_and_loss_correlation(),
-            )
-            evaluate_ensemble(
-                "ENS_SIZE_QDO",
-                ens_size_qdo,
-                repo,
-                task,
-                predictions_val,
-                predictions_test,
-                y_val,
-                y_test,
-                metric,
-                seed=random_seed,
-            )
-
-        # QDO evaluation with memory usage and loss correlation
-        if run_memory_qdo:
-            max_possible_ensemble_memory_usage = sum(
-                [bm.model_metadata["memory"] for bm in base_models],
-            )
-            memory_qdo = QDOEnsembleSelection(
-                base_models=base_models,
-                n_iterations=3,
-                score_metric=metric,
-                random_state=random_seed,
-                behavior_space=get_custom_behavior_space_with_memory_usage(
-                    max_possible_ensemble_memory_usage
-                ),
-                base_models_metadata_type="custom",
-            )
-            evaluate_ensemble(
-                "MEMORY_QDO",
-                memory_qdo,
-                repo,
-                task,
-                predictions_val,
-                predictions_test,
-                y_val,
-                y_test,
-                metric,
-                seed=random_seed,
-            )
-
-        # QDO evaluation with disk usage and loss correlation
-        if run_disk_qdo:
-            max_possible_ensemble_disk_usage = sum(
-                [bm.model_metadata["diskspace"] for bm in base_models],
-            )
-            disk_qdo = QDOEnsembleSelection(
-                base_models=base_models,
-                n_iterations=3,
-                score_metric=metric,
-                random_state=random_seed,
-                behavior_space=get_custom_behavior_space_with_disk_usage(
-                    max_possible_ensemble_disk_usage
-                ),
-                base_models_metadata_type="custom",
-            )
-            evaluate_ensemble(
-                "DISK_QDO",
-                disk_qdo,
-                repo,
-                task,
-                predictions_val,
-                predictions_test,
-                y_val,
-                y_test,
-                metric,
-                seed=random_seed,
-            )
+        _task_data.update(
+            repo=repo,
+            task=task,
+            base_models=base_models,
+            predictions_val=predictions_val,
+            predictions_test=predictions_test,
+            y_val=y_val,
+            y_test=y_test,
+            metric=metric,
+            seed=random_seed,
+        )
+        if n_jobs == 1:
+            for job in task_jobs:
+                _run_job(job)
+        else:
+            # Forked workers share the task data with the main process instead of copying it
+            with ProcessPoolExecutor(
+                max_workers=min(n_jobs, len(task_jobs)),
+                mp_context=multiprocessing.get_context("fork"),
+            ) as executor:
+                # Iterating the results re-raises exceptions from the workers
+                for _ in executor.map(_run_job, task_jobs):
+                    pass
+        _task_data.clear()
 
 
 if __name__ == "__main__":
@@ -778,6 +773,8 @@ if __name__ == "__main__":
         methods=args.methods,
         folds=args.folds,
         datasets=args.datasets,
+        n_jobs=args.n_jobs,
+        legacy_multi_ges=args.legacy_multi_ges,
         run_singleBest=True,
         run_ges=True,
         run_multi_ges=True,

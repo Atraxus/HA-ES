@@ -51,6 +51,10 @@ To run the experiments for one seed use
 For a quick test, restrict the methods, datasets and folds, e.g.
 - `uv run python src/generate_data.py --methods ExtraTrees --folds 0 --datasets blood-transfusion-service-center`
 
+The ensembles of a task are fitted in parallel on all available CPUs (set the number with `--n-jobs`). A task consists of 28 ensemble fits, 21 of which (GES and Multi-GES) take similarly long, so 7 or 11 CPUs are used most efficiently.
+
+In the code used for the publications, the Multi-GES weights were fitted one after another with the same ensemble object, which limited each weight to the best iteration of the previous weight instead of 100 iterations. This is fixed; `--legacy-multi-ges` reproduces the previous behavior.
+
 `single_run_job.sh` and `multiple_runs_job.sh` run seeds 0-9 on a Slurm cluster. Afterwards, `check_results.py` lists missing result files and `src/process_data.py` aggregates the results into `data/`, which the notebooks in `notebooks/` use for plotting.
 
 ## Relevant Publications
