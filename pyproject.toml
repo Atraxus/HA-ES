@@ -29,6 +29,14 @@ notebooks = [
     "ipywidgets",
 ]
 
+# Model libraries needed by src/config_stats.py to fit every TabArena config
+# (`uv sync --group measure`); evaluating ensembles only needs the predictions.
+measure = [
+    "autogluon.tabular[catboost,lightgbm,xgboost,fastai,interpret]",
+    # Listed directly so that the CPU-only index below applies to it
+    "torch",
+]
+
 [tool.uv]
 package = false
 
@@ -36,3 +44,10 @@ package = false
 tabarena = { git = "https://github.com/autogluon/tabarena", subdirectory = "packages/tabarena", rev = "52dac56df3504774ffb273f923e31cc28f955291" }
 bencheval = { git = "https://github.com/autogluon/tabarena", subdirectory = "packages/bencheval", rev = "52dac56df3504774ffb273f923e31cc28f955291" }
 phem = { path = "extern/phem", editable = true }
+# CPU-only build; the default Linux wheels bundle several GB of CUDA libraries
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
