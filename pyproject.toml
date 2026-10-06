@@ -13,7 +13,6 @@ dependencies = [
     # phem and its pinned ribs==0.4.0 use NumPy APIs removed in NumPy 2 (np.product, np.trapz)
     "numpy<2",
     "pandas",
-    "psutil",
     "tqdm",
 ]
 

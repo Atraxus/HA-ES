@@ -1,18 +1,28 @@
 """Measure inference memory and disk usage of every TabArena config on dummy data.
 
 Writes data/model_memory_and_disk_usage.csv, which generate_data.py and process_data.py read.
+
+Columns:
+    Inference_Memory_Usage: peak resident memory of a fresh process while it loads the fitted
+        predictor and predicts, after a warm-up load (see memory_probe.py). Used as the memory
+        cost of a model.
+    Peak_Memory_During_Inference: peak memory allocated through Python during prediction
+        (tracemalloc). Misses memory allocated by native libraries, e.g. CatBoost or LightGBM.
+    Predictor_Size, Learner_Size, Models_Size, Total_Size: size on disk in bytes.
 """
 
 import argparse
+import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import tracemalloc
 from multiprocessing import Process, Queue
 
 import numpy as np
 import pandas as pd
-import psutil
 from autogluon.tabular import TabularPredictor
 from tqdm import tqdm
 
@@ -46,9 +56,23 @@ def create_dummy_data(num_samples: int = 500, num_features: int = 15):
     return train_data, test_data
 
 
+MEMORY_PROBE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory_probe.py")
+
+
+def probe_inference_memory(predictor_path: str, test_data_path: str) -> int:
+    """Run memory_probe.py in a fresh process and return its result in bytes."""
+    result = subprocess.run(
+        [sys.executable, MEMORY_PROBE, predictor_path, test_data_path],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(result.stdout.strip().splitlines()[-1])["inference_memory"]
+
+
 # Function to measure memory during inference
 def measure_inference_memory(
-    config_name, model_type, hyperparameters, train_data, test_data, result_queue
+    config_name, model_type, hyperparameters, train_data, test_data_path, result_queue
 ):
     # Each predictor is only needed for the measurement, so it is written to a temporary directory
     predictor_path = tempfile.mkdtemp(prefix="config_stats_")
@@ -63,19 +87,14 @@ def measure_inference_memory(
             verbosity=0,
         )
 
-        process = psutil.Process(os.getpid())
-        mem_before = process.memory_info().rss
+        test_data = pd.read_csv(test_data_path)
         tracemalloc.start()
-
-        predictor.predict(test_data.drop(columns=["target"]))
-
-        current, peak = tracemalloc.get_traced_memory()
+        predictor.predict(test_data)
+        _, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
 
-        mem_after = process.memory_info().rss
-        mem_usage_inference = mem_after - mem_before
-
         predictor.save()
+        mem_usage_inference = probe_inference_memory(predictor.path, test_data_path)
 
         predictor_file = os.path.join(predictor.path, "predictor.pkl")
         learner_file = os.path.join(predictor.path, "learner.pkl")
@@ -101,6 +120,11 @@ def measure_inference_memory(
             "Total_Size": total_deployed_size,
         })
 
+    except subprocess.CalledProcessError as e:
+        result_queue.put({
+            "Model": config_name,
+            "Error": f"memory probe failed: {e.stderr.strip()[-500:]}"
+        })
     except Exception as e:
         result_queue.put({
             "Model": config_name,
@@ -116,6 +140,10 @@ def main(methods: list[str], save_path: str):
         methods=methods, download="auto"
     )
     train_data, test_data = create_dummy_data()
+    # The memory probe runs in a separate process and reads the test data from a file
+    data_dir = tempfile.mkdtemp(prefix="config_stats_data_")
+    test_data_path = os.path.join(data_dir, "test.csv")
+    test_data.drop(columns=["target"]).to_csv(test_data_path, index=False)
 
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
 
@@ -135,7 +163,7 @@ def main(methods: list[str], save_path: str):
                 config["model_type"],
                 config["hyperparameters"],
                 train_data,
-                test_data,
+                test_data_path,
                 result_queue,
             ),
         )
@@ -159,6 +187,7 @@ def main(methods: list[str], save_path: str):
 
     # Final save after all processing
     pbar.close()
+    shutil.rmtree(data_dir, ignore_errors=True)
     pd.DataFrame(results).to_csv(save_path, index=False)
 
     # Output the first few rows for debugging purposes

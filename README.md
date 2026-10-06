@@ -39,10 +39,13 @@ To also install the dependencies of the notebooks, use `uv sync --all-groups`.
 The base models are the configs of the TabArena methods listed in `DEFAULT_METHODS` in `src/tabarena_data.py`. Their processed artifacts (predictions, labels and metrics) are stored in `~/.cache/tabarena` (override with the `TABARENA_CACHE` environment variable). Each method is several GB, so select a subset with `--methods` for a smaller run. Download them once before running the experiments, in particular before starting several runs in parallel:
 - `uv run python src/download_data.py`
 
-The memory and disk usage of each config is not part of TabArena. It is measured on dummy data by
+The memory and disk usage of each config is not part of TabArena. It is measured on dummy data by fitting every config with AutoGluon, which needs the model libraries of the `measure` dependency group:
+- `uv sync --group measure`
 - `uv run python src/config_stats.py`
 
 which writes `data/model_memory_and_disk_usage.csv`. Configs without a measurement fall back to the median of their model type. The `Dockerfile` runs the same script in a container.
+
+The memory cost of a config is the peak resident memory of a fresh process while it loads the fitted model and predicts, measured after a warm-up load so that library code shared by all ensemble members is not attributed to each model (`src/memory_probe.py`, Linux only).
 
 ### Run
 To run the experiments for one seed use

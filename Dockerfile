@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
 # Install the locked dependencies (TabArena, AutoGluon, phem)
 COPY pyproject.toml uv.lock README.md ./
 COPY extern/phem extern/phem
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --group measure
 
 COPY src src
 

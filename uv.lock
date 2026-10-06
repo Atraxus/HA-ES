@@ -1222,7 +1222,6 @@ dependencies = [
     { name = "numpy" },
     { name = "pandas" },
     { name = "phem" },
-    { name = "psutil" },
     { name = "tabarena" },
     { name = "tqdm" },
 ]
@@ -1251,7 +1250,6 @@ requires-dist = [
     { name = "numpy", specifier = "<2" },
     { name = "pandas" },
     { name = "phem", editable = "extern/phem" },
-    { name = "psutil" },
     { name = "tabarena", git = "https://github.com/autogluon/tabarena?subdirectory=packages%2Ftabarena&rev=52dac56df3504774ffb273f923e31cc28f955291" },
     { name = "tqdm" },
 ]
