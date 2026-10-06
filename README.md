@@ -45,7 +45,7 @@ The memory and disk usage of each config is not part of TabArena. It is measured
 
 which writes `data/model_memory_and_disk_usage.csv`. Configs without a measurement fall back to the median of their model type. The `Dockerfile` runs the same script in a container.
 
-The memory cost of a config is the peak resident memory of a fresh process while it loads the fitted model and predicts, measured after a warm-up load so that library code shared by all ensemble members is not attributed to each model (`src/memory_probe.py`, Linux only).
+The memory cost of a config is the increase in resident memory of a fresh process from loading the fitted model and predicting, measured after a warm-up load so that library code shared by all ensemble members is not attributed to each model (`src/memory_probe.py`, Linux only). Each config is fitted with the model class TabArena benchmarked it with.
 
 ### Run
 To run the experiments for one seed use

@@ -3,9 +3,9 @@
 Writes data/model_memory_and_disk_usage.csv, which generate_data.py and process_data.py read.
 
 Columns:
-    Inference_Memory_Usage: peak resident memory of a fresh process while it loads the fitted
-        predictor and predicts, after a warm-up load (see memory_probe.py). Used as the memory
-        cost of a model.
+    Inference_Memory_Usage: increase of the resident memory of a fresh process from loading the
+        fitted predictor and predicting, after a warm-up load (see memory_probe.py). Used as the
+        memory cost of a model.
     Peak_Memory_During_Inference: peak memory allocated through Python during prediction
         (tracemalloc). Misses memory allocated by native libraries, e.g. CatBoost or LightGBM.
     Predictor_Size, Learner_Size, Models_Size, Total_Size: size on disk in bytes.
@@ -24,6 +24,7 @@ from multiprocessing import Process, Queue
 import numpy as np
 import pandas as pd
 from autogluon.tabular import TabularPredictor
+from tabarena.models import get_model_registry
 from tqdm import tqdm
 
 from tabarena_data import DEFAULT_METHODS, RESOURCE_USAGE_PATH, get_context
@@ -70,9 +71,22 @@ def probe_inference_memory(predictor_path: str, test_data_path: str) -> int:
     return json.loads(result.stdout.strip().splitlines()[-1])["inference_memory"]
 
 
+def get_model_classes() -> dict:
+    """The model class TabArena benchmarked each method with, by method name.
+
+    Usually AutoGluon's own class for the config's model type, but some methods use TabArena's
+    own implementation with additional hyperparameters (e.g. KNeighbors).
+    """
+    return {
+        info.method_metadata.method: info.model_cls
+        for info in get_model_registry().values()
+        if info.method_metadata is not None
+    }
+
+
 # Function to measure memory during inference
 def measure_inference_memory(
-    config_name, model_type, hyperparameters, train_data, test_data_path, result_queue
+    config_name, model_type, model_cls, hyperparameters, train_data, test_data_path, result_queue
 ):
     # Each predictor is only needed for the measurement, so it is written to a temporary directory
     predictor_path = tempfile.mkdtemp(prefix="config_stats_")
@@ -82,7 +96,7 @@ def measure_inference_memory(
         )
         predictor.fit(
             train_data=train_data,
-            hyperparameters={model_type: [hyperparameters]},
+            hyperparameters={model_cls: [hyperparameters]},
             time_limit=60,
             verbosity=0,
         )
@@ -135,10 +149,16 @@ def measure_inference_memory(
 
 
 def main(methods: list[str], save_path: str):
-    # {config_name: {"model_type": ..., "hyperparameters": {...}}}
-    configs_hyperparameters = get_context().load_configs_hyperparameters(
-        methods=methods, download="auto"
-    )
+    context = get_context()
+    model_classes = get_model_classes()
+    # (config_name, method, {"model_type": ..., "hyperparameters": {...}})
+    configs = [
+        (config_name, method, config)
+        for method in methods
+        for config_name, config in context.method_metadata(method)
+        .load_configs_hyperparameters(download="auto")
+        .items()
+    ]
     train_data, test_data = create_dummy_data()
     # The memory probe runs in a separate process and reads the test data from a file
     data_dir = tempfile.mkdtemp(prefix="config_stats_data_")
@@ -150,9 +170,9 @@ def main(methods: list[str], save_path: str):
     # Incremental saving setup
     save_interval = 10  # Save every 10 models processed
     results = []
-    pbar = tqdm(total=len(configs_hyperparameters), desc="Total Progress")
+    pbar = tqdm(total=len(configs), desc="Total Progress")
 
-    for config_name, config in configs_hyperparameters.items():
+    for config_name, method, config in configs:
         pbar.set_description(f"Processing {config_name}")
 
         result_queue = Queue()
@@ -161,6 +181,7 @@ def main(methods: list[str], save_path: str):
             args=(
                 config_name,
                 config["model_type"],
+                model_classes[method],
                 config["hyperparameters"],
                 train_data,
                 test_data_path,

@@ -1,16 +1,19 @@
-"""Measure the memory needed to load a saved AutoGluon predictor and predict with it.
+"""Measure the memory a saved AutoGluon predictor occupies once loaded and used for prediction.
 
 Run by config_stats.py in a fresh process for every config:
 
     python memory_probe.py <predictor_path> <data.csv>
 
-Prints the peak resident memory (in bytes) while loading the predictor and predicting on the data.
-The predictor is first loaded and used once as a warm-up, then freed, and only the second load and
-prediction is measured. The warm-up loads all lazily imported library code, which the members of an
-ensemble share in one process, so it is not attributed to every single model.
+Prints the increase of the resident memory (in bytes) from loading the predictor and predicting on
+the data. The predictor is first loaded and used once as a warm-up, then freed, and only the second
+load and prediction is measured. The warm-up loads all lazily imported library code, which the
+members of an ensemble share in one process, so it is not attributed to every single model.
 
-Linux only: the peak resident memory is reset via /proc/self/clear_refs, and freed memory is
-returned to the operating system with glibc's malloc_trim.
+The resident memory is read from /proc/self/smaps_rollup, which is exact. The per-process counters
+in /proc/self/status (VmRSS, VmHWM) are approximations whose error grows with the number of CPUs,
+which made peak measurements of small models unreliable on large cluster nodes.
+
+Linux only: requires /proc/self/smaps_rollup and glibc's malloc_trim.
 """
 
 import ctypes
@@ -19,12 +22,13 @@ import json
 import sys
 
 
-def _status_bytes(field: str) -> int:
-    with open("/proc/self/status") as f:
+def _resident_memory() -> int:
+    """Exact resident memory of this process in bytes."""
+    with open("/proc/self/smaps_rollup") as f:
         for line in f:
-            if line.startswith(field + ":"):
+            if line.startswith("Rss:"):
                 return int(line.split()[1]) * 1024  # reported in kB
-    raise RuntimeError(f"{field} not found in /proc/self/status")
+    raise RuntimeError("Rss not found in /proc/self/smaps_rollup")
 
 
 def _load_and_predict(predictor_path, data):
@@ -46,14 +50,9 @@ def measure(predictor_path: str, data_path: str) -> int:
     gc.collect()
     ctypes.CDLL("libc.so.6").malloc_trim(0)
 
-    # Reset the peak resident memory (VmHWM) to the current resident memory and use it as baseline.
-    # The peak only grows from here, so the result cannot become negative.
-    with open("/proc/self/clear_refs", "w") as f:
-        f.write("5")
-    baseline = _status_bytes("VmHWM")
-
-    predictor = _load_and_predict(predictor_path, data)
-    return _status_bytes("VmHWM") - baseline
+    baseline = _resident_memory()
+    predictor = _load_and_predict(predictor_path, data)  # noqa: F841 (kept alive for the measurement)
+    return _resident_memory() - baseline
 
 
 if __name__ == "__main__":
