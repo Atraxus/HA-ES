@@ -36,7 +36,9 @@ from tabarena_data import (
     CLASSIFICATION_PROBLEM_TYPES,
     DEFAULT_FOLDS,
     DEFAULT_METHODS,
+    categorical_if_mixed,
     classification_datasets,
+    config_metadata,
     config_resource_usage,
     initialize_tasks,
     load_repo,
@@ -444,24 +446,24 @@ def load_and_process_base_models(
         dataset=dataset, fold=fold, configs=configs, binary_as_multiclass=True
     )
 
+    config_types = [repo.config_type(config=config) for config in configs]
+    # The hyperparameters compared by QDO's config space similarity, namespaced by model family
+    config_dicts = categorical_if_mixed(
+        [
+            config_metadata(
+                config_type,
+                repo.config_hyperparameters(config=config, include_ag_args=False) or {},
+            )
+            for config, config_type in zip(configs, config_types)
+        ]
+    )
+
     # Iterate over each config to create a base model representation
     base_models = []
     for i, config in enumerate(configs):
         time_infer_s = task_metrics.loc[config, "time_infer_s"]
         time_train_s = task_metrics.loc[config, "time_train_s"]
-
-        config_type = repo.config_type(config=config)
-        config_hyperparameters = (
-            repo.config_hyperparameters(config=config, include_ag_args=False) or {}
-        )
-        config_dict = {}
-        for key, value in config_hyperparameters.items():
-            try:
-                config_dict[key] = float(value)
-            except (ValueError, TypeError):
-                continue
-
-        config_dict["model_type"] = config_type
+        config_type = config_types[i]
 
         memory_used, disk_space_used = config_resource_usage(
             df_usage, config, config_type
@@ -478,7 +480,7 @@ def load_and_process_base_models(
                 "val_predict_time": time_infer_s,
                 "memory": memory_used,
                 "diskspace": disk_space_used,
-                "config": config_dict,
+                "config": config_dicts[i],
                 "auto-sklearn-model": "PLACEHOLDER",
             },
         )

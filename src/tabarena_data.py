@@ -1,5 +1,6 @@
 """Shared helpers for loading TabArena data and the per-config resource measurements."""
 
+import numbers
 import os
 import warnings
 
@@ -29,6 +30,10 @@ CLASSIFICATION_PROBLEM_TYPES = ("binary", "multiclass")
 
 RESOURCE_USAGE_PATH = "data/model_memory_and_disk_usage.csv"
 
+# Keys TabArena adds to configs for AutoGluon bookkeeping (e.g. "ag.verbosity").
+# `include_ag_args=False` only drops "ag_args".
+AG_BOOKKEEPING_PREFIXES = ("ag_args", "ag.")
+
 
 def get_context() -> TabArenaContext:
     return TabArenaContext(backend="native")
@@ -52,6 +57,37 @@ def initialize_tasks(repo, datasets: list[str], folds: list[int]) -> list[str]:
         for dataset in datasets
         for fold in folds
         if fold in repo.dataset_to_folds(dataset)
+    ]
+
+
+def config_metadata(config_type: str, hyperparameters: dict) -> dict:
+    """The config dict compared by phem's config space Gower similarity (QDO).
+
+    Like phem's Auto-sklearn configs: keys are namespaced as "<config_type>:<key>", "model_type"
+    names the family, numbers are numeric and everything else (strings, lists, None) is
+    categorical. Configs of different families then share only "model_type", so their similarity
+    is 0, and each numeric range covers one family. See docs/qdo_config_metadata.md.
+    """
+    metadata = {"model_type": config_type}
+    for key, value in hyperparameters.items():
+        if key.startswith(AG_BOOKKEEPING_PREFIXES):
+            continue
+        numeric = isinstance(value, numbers.Number)
+        metadata[f"{config_type}:{key}"] = float(value) if numeric else str(value)
+    return metadata
+
+
+def categorical_if_mixed(configs: list[dict]) -> list[dict]:
+    """Make keys whose values mix numbers and strings (e.g. max_features 0.5 or "sqrt")
+    categorical, as phem would otherwise subtract a string from a number."""
+    mixed = {
+        key
+        for key in {key for config in configs for key in config}
+        if len({isinstance(config[key], str) for config in configs if key in config}) > 1
+    }
+    return [
+        {key: str(value) if key in mixed else value for key, value in config.items()}
+        for config in configs
     ]
 
 

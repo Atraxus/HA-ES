@@ -16,7 +16,7 @@ The experiments in the publications below were run on TabRepo, the predecessor o
 | `SINGLE_BEST` | Single-Best | The single base model with the best validation score |
 | `GES` | GES* | Greedy ensemble selection, returning the ensemble of every iteration |
 | `MULTI_GES-<w>` | Multi-GES(`w`) | GES with a static weighting `w` of inference time against predictive performance; the paper uses `w = 0.68` |
-| `QDO` | QDO-ES | Quality diversity optimization over average loss correlation and config space similarity (not hardware-aware) |
+| `QDO` | QDO-ES | Quality diversity optimization over average loss correlation and config space similarity (not hardware-aware). The similarity compares hyperparameters within a model family; configs of different families count as maximally dissimilar (see `docs/qdo_config_metadata.md`) |
 | `INFER_TIME_QDO`, `DISK_QDO`, `ENS_SIZE_QDO` | Inference Time, Diskspace, Ensemble Size | Ablations of HAPEns with a different cost metric |
 | `QO` | | Quality optimization without a behavior space (not used in the paper) |
 
