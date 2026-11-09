@@ -14,9 +14,10 @@
 # them and draws the plot. Replace YOUR_PARTITION (twice) with your Slurm partition, then start it
 # from the project root, not with sbatch:
 #   export TABARENA_CACHE=/path/to/tabarena/store
-#   bash inference_pareto_job.sh [--seed S] [--folds 0 1 2] [--steps 40]
+#   bash inference_pareto_job.sh [--seed S [S ...]] [--folds 0 1 2] [--steps 40]
+# Several seeds get one array each and a single aggregate job that averages them per task.
 # Outputs: results/inference_pareto/seed_<S>/<dataset>/, data/inference_pareto_*.csv and
-# plots/inference-pareto-mean-time.png. Needs `uv sync --group notebooks`.
+# plots/inference-pareto-mean-time*.png. Needs `uv sync --group notebooks`.
 set -eo pipefail
 
 : "${TABARENA_CACHE:?Set TABARENA_CACHE to the TabArena store}"
@@ -25,19 +26,39 @@ export MPLBACKEND=Agg
 
 if [ -z "$SLURM_ARRAY_TASK_ID" ]; then
     mkdir -p logs
-    ARRAY_JOB=$(sbatch --parsable "$0" "$@")
+    SEEDS=()
+    RUN_ARGS=()
     AGGREGATE_ARGS=()
-    args=("$@")
-    for ((i = 0; i < ${#args[@]} - 1; i++)); do
-        case "${args[i]}" in
-            --seed | --output-root) AGGREGATE_ARGS+=("${args[i]}" "${args[i + 1]}") ;;
+    while (($#)); do
+        case "$1" in
+            --seed)
+                shift
+                while (($#)) && [[ "$1" != --* ]]; do
+                    SEEDS+=("$1")
+                    shift
+                done
+                ;;
+            --output-root)
+                RUN_ARGS+=("$1" "$2")
+                AGGREGATE_ARGS+=("$1" "$2")
+                shift 2
+                ;;
+            *)
+                RUN_ARGS+=("$1")
+                shift
+                ;;
         esac
     done
-    AGGREGATE_JOB=$(sbatch --parsable --dependency=afterok:"$ARRAY_JOB" \
+    [ "${#SEEDS[@]}" -gt 0 ] || SEEDS=(0)
+    ARRAY_JOBS=""
+    for seed in "${SEEDS[@]}"; do
+        ARRAY_JOBS+=":$(sbatch --parsable "$0" --seed "$seed" "${RUN_ARGS[@]}")"
+    done
+    AGGREGATE_JOB=$(sbatch --parsable --dependency=afterok"$ARRAY_JOBS" \
         --job-name=inference_pareto_aggregate --partition=YOUR_PARTITION --time=01:00:00 \
         --cpus-per-task=4 --mem=48G --output=logs/inference_pareto_aggregate_%j.out \
-        --wrap "source .venv/bin/activate && python src/inference_pareto.py aggregate ${AGGREGATE_ARGS[*]}")
-    echo "Submitted array $ARRAY_JOB and aggregate $AGGREGATE_JOB"
+        --wrap "source .venv/bin/activate && python src/inference_pareto.py aggregate --seed ${SEEDS[*]} ${AGGREGATE_ARGS[*]}")
+    echo "Submitted arrays ${ARRAY_JOBS#:} and aggregate $AGGREGATE_JOB"
     exit 0
 fi
 

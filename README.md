@@ -71,6 +71,8 @@ It needs the plotting dependencies and the methods of `PARETO_POOLS` in `src/tab
 
 For one dataset without Slurm, use `uv run python src/inference_pareto.py run --datasets blood-transfusion-service-center` and then `uv run python src/inference_pareto.py aggregate`. Results are written to `results/inference_pareto/`, the points and leaderboard to `data/inference_pareto_*.csv`, and the figure to `plots/inference-pareto-mean-time.png`. `data/` and `plots/` are not tracked; the figure and both CSVs of the seed 0 run on all 38 datasets are kept in `docs/inference_pareto/`.
 
+For several seeds, use `bash inference_pareto_job.sh --seed 0 1 2 3 4 5 6 7 8 9`, or `aggregate --seed 0 1 2` on finished runs. Each seed's fronts are built separately, then each entrant's error and inference time are averaged per task over the seeds and scored in one `compare` run. All seeds must cover the same tasks. The outputs get the suffix `_<n>_seeds` (`-<n>-seeds` for the figure), so they do not replace a single seed's.
+
 ## Relevant Publications
 If you use HAPEns or HA-ES in scientific publications, we would appreciate citations.
 

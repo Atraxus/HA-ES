@@ -13,8 +13,10 @@ GES, QO-ES and QDO-ES return one ensemble per task and are single points, as is 
 config on validation. TabArena's ``compare`` scores every entrant in one run with RandomForest's
 default at 1000. Elo is relative to the entrants, so compare results only within one ``aggregate``.
 
-``run`` handles one dataset, so a SLURM array covers the datasets (``inference_pareto_job.sh``);
-``aggregate`` merges them, scores and plots. Run from the repository root.
+``run`` handles one dataset and seed, so a SLURM array per seed covers the datasets
+(``inference_pareto_job.sh``); ``aggregate`` merges them, scores and plots. Given several seeds, it
+averages each entrant's error and time per task over the seeds and scores the averages in one run.
+Run from the repository root.
 """
 
 # First: generate_data sets the BLAS thread limits, which must happen before numpy is imported.
@@ -62,6 +64,8 @@ FRONT_POSITIONS = tuple(float(position) for position in np.linspace(0.0, 1.0, 9)
 ENSEMBLE_STEPS = 40
 METRIC_NAME = "roc_auc"
 _GROUP_COLUMNS = ["pool", "algorithm", "dataset", "fold"]
+_ENTRANT_KEYS = ["method", "dataset", "fold"]
+_AVERAGED_COLUMNS = ["metric_error", "metric_error_val", "time_infer_s"]
 _SUITE = "HA-ES"
 
 # Each search's method id in generate_data._build_ensemble
@@ -389,10 +393,8 @@ def pareto_points(
     )
 
 
-def aggregate(
-    *, seed: int, output_root: Path, data_dir: Path, plots_dir: Path, name: str | None
-) -> pd.DataFrame:
-    """Merge the per-dataset jobs of one seed, score them once and plot."""
+def seed_entrants(seed: int, output_root: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """One seed's per-split entrant rows and family rows, merged over its per-dataset jobs."""
     element_dirs = sorted(
         path.parent for path in (output_root / f"seed_{seed}").glob(f"*/{ENSEMBLES_FILE}")
     )
@@ -415,8 +417,42 @@ def aggregate(
     )
     reference = family[family["method"] == REFERENCE_NAME]
     check_coverage(entrants, set(zip(reference["dataset"], reference["fold"], strict=True)))
+    return entrants, family
+
+
+def average_over_seeds(per_seed: list[pd.DataFrame]) -> pd.DataFrame:
+    """One row per (entrant, task) with the mean error and time over the seeds.
+
+    Each seed's fronts are built separately, so a front position averages the ensembles the seeds
+    chose for it. Averaging rather than adding seeds as splits keeps the tasks ``compare`` sees.
+    """
+    tasks = [set(rows[_ENTRANT_KEYS].itertuples(index=False, name=None)) for rows in per_seed]
+    for seed_tasks in tasks[1:]:
+        if seed_tasks != tasks[0]:
+            raise ValueError(
+                f"Seeds cover different tasks, e.g. {sorted(seed_tasks ^ tasks[0])[:5]}"
+            )
+    merged = pd.concat(per_seed, ignore_index=True)
+    how = {
+        column: "mean" if column in _AVERAGED_COLUMNS else "first"
+        for column in merged.columns
+        if column not in _ENTRANT_KEYS
+    }
+    return merged.groupby(_ENTRANT_KEYS, sort=False, as_index=False).agg(how)
+
+
+def aggregate(
+    *, seeds: list[int], output_root: Path, data_dir: Path, plots_dir: Path, name: str | None
+) -> pd.DataFrame:
+    """Merge the per-dataset jobs of the seeds, score them once and plot."""
+    per_seed, families = zip(*(seed_entrants(seed, output_root) for seed in seeds), strict=True)
+    entrants = average_over_seeds(list(per_seed))
+    family = families[0]
 
     leaderboard = tabarena_leaderboard(entrants)
+    # Several seeds get their own files, so they do not replace a single seed's.
+    if name is None and len(seeds) > 1:
+        name = f"{len(seeds)}_seeds"
     suffix = f"_{name}" if name else ""
     data_dir.mkdir(parents=True, exist_ok=True)
     leaderboard.to_csv(data_dir / f"inference_pareto_leaderboard{suffix}.csv")
@@ -433,7 +469,7 @@ def aggregate(
     points.to_csv(data_dir / f"inference_pareto_points{suffix}.csv", index=False)
     plot_name = f"inference-pareto-mean-time{suffix.replace('_', '-')}.png"
     path = plot_inference_pareto(points, plots_dir / plot_name)
-    print(f"Merged {len(element_dirs)} datasets; wrote {path}")
+    print(f"Merged {entrants['dataset'].nunique()} datasets, {len(seeds)} seed(s); wrote {path}")
     return points
 
 
@@ -454,7 +490,9 @@ def main() -> None:
     run_parser.add_argument("--n-jobs", type=int, default=1)
     run_parser.add_argument("--output-root", type=Path, default=RESULTS_ROOT)
     aggregate_parser = commands.add_parser("aggregate", help="Merge, score and plot a finished run")
-    aggregate_parser.add_argument("--seed", type=int, default=0)
+    aggregate_parser.add_argument(
+        "--seed", type=int, nargs="+", default=[0], help="Several seeds are averaged per task."
+    )
     aggregate_parser.add_argument("--output-root", type=Path, default=RESULTS_ROOT)
     aggregate_parser.add_argument("--data-dir", type=Path, default=Path("data"))
     aggregate_parser.add_argument("--plots-dir", type=Path, default=Path("plots"))
@@ -472,7 +510,7 @@ def main() -> None:
         )
     else:
         aggregate(
-            seed=args.seed,
+            seeds=args.seed,
             output_root=args.output_root,
             data_dir=args.data_dir,
             plots_dir=args.plots_dir,
