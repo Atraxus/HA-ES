@@ -60,6 +60,17 @@ In the code used for the publications, the Multi-GES weights were fitted one aft
 
 `single_run_job.sh` and `multiple_runs_job.sh` run seeds 0-9 on a Slurm cluster. Afterwards, `check_results.py` lists missing result files and `src/process_data.py` aggregates the results into `data/`, which the notebooks in `notebooks/` use for plotting.
 
+### Inference time against performance on pruned pools
+`src/inference_pareto.py` compares Infer-QDO-ES (full budget, 3 batches, and sparse with a static removal probability of 20%), GES, QO-ES, QDO-ES and each family's best config on validation, by test Elo against the ensemble's inference time. It runs on two pools, the 9 classic methods and the 12 foundation models, each pruned with TabArena's `EnsembleScorerMaxModels`, on the classification datasets and with ROC AUC. Every search gets 40 steps times the pool size (`--steps`), except the 3-batch variant, which always gets the single models plus 3 batches of 40. TabArena's `compare` scores all entrants in one run, with RandomForest's default at Elo 1000, so Elos are only comparable within one `aggregate`.
+
+It needs the plotting dependencies and the methods of `PARETO_POOLS` in `src/tabarena_data.py`. No memory or disk measurements are needed. To run seed 0 on a Slurm cluster (one array element per dataset, then a job that merges them and draws the plot), run this from the project root:
+- `uv sync --group notebooks`
+- replace `YOUR_PARTITION` in `inference_pareto_job.sh` with your Slurm partition
+- `export TABARENA_CACHE=/path/to/tabarena/store`
+- `bash inference_pareto_job.sh`
+
+For one dataset without Slurm, use `uv run python src/inference_pareto.py run --datasets blood-transfusion-service-center` and then `uv run python src/inference_pareto.py aggregate`. Results are written to `results/inference_pareto/`, the points and leaderboard to `data/inference_pareto_*.csv`, and the figure to `plots/inference-pareto-mean-time.png`. `data/` and `plots/` are not tracked; the figure and both CSVs of the seed 0 run on all 38 datasets are kept in `docs/inference_pareto/`.
+
 ## Relevant Publications
 If you use HAPEns or HA-ES in scientific publications, we would appreciate citations.
 

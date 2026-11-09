@@ -1,5 +1,6 @@
 """Shared helpers for loading TabArena data and the per-config resource measurements."""
 
+import dataclasses
 import numbers
 import os
 import warnings
@@ -7,6 +8,7 @@ import warnings
 import pandas as pd
 from tabarena.contexts.tabarena.context import TabArenaContext
 from tabarena.repository import EvaluationRepositoryCollection
+from tabarena.simulation.ensemble_selection_config_scorer import EnsembleScorerMaxModels
 
 # CPU config methods from TabArena whose base models are ensembled. Each method is a model family
 # with its own hyperparameter configs (e.g. "LightGBM_c1_BAG_L1", "LightGBM_r1_BAG_L1", ...).
@@ -22,6 +24,45 @@ DEFAULT_METHODS = [
     "RandomForest",
     "XGBoost",
 ]
+
+# The pools of the inference-time Pareto comparison (src/inference_pareto.py).
+PARETO_POOLS = {
+    "cross_family": [
+        "CatBoost",
+        "ExtraTrees",
+        "LightGBM",
+        "NeuralNetFastAI",
+        "NeuralNetTorch",
+        "RandomForest",
+        "RealMLP_GPU",
+        "TabM",
+        "XGBoost",
+    ],
+    "across_foundation_models": [
+        "EXAONE-Tabular",
+        "LimiX",
+        "RealTabPFN-v2.5",
+        "SAP-RPT-OSS",
+        "TabDPT-Turbo",
+        "TabDPT_GPU",
+        "TabFM",
+        "TabICLv2",
+        "TabPFN-3",
+        "TabPFN-v2.6",
+        "TabSTAR",
+        "TabSwift",
+    ],
+}
+
+# The pinned TabArena registers these methods under tabarena-2026-09-16. The Pareto comparison uses
+# the artifacts of the suites below; left as registered, load_repo would download other ones.
+PARETO_METHOD_SUITES = {
+    "EXAONE-Tabular": "tabarena-2026-08-06",
+    "TabFM": "tabarena-2026-07-13",
+    "TabICLv2": "tabarena-2026-07-13",
+    "TabPFN-3": "tabarena-2026-07-13",
+    "TabSwift": "tabarena-2026-07-13",
+}
 
 # TabArena numbers the splits of a dataset (repeats x folds) as folds; 0-2 are the folds of the first repeat.
 DEFAULT_FOLDS = [0, 1, 2]
@@ -44,6 +85,36 @@ def load_repo(methods: list[str] | None = None) -> EvaluationRepositoryCollectio
     if methods is None:
         methods = DEFAULT_METHODS
     return get_context().load_repo(methods=methods)
+
+
+def pareto_method_metadata(context: TabArenaContext, method: str):
+    """TabArena's metadata of `method`, moved to the suite the Pareto comparison uses."""
+    metadata = context.method_metadata(method=method)
+    suite = PARETO_METHOD_SUITES.get(method)
+    return metadata if suite is None else dataclasses.replace(metadata, suite=suite)
+
+
+def load_pool_repo(methods: list[str]) -> EvaluationRepositoryCollection:
+    """Load one Pareto pool's methods as one collection, `repo.repos` in the order of `methods`."""
+    context = get_context()
+    return context.load_repo(methods=[pareto_method_metadata(context, m) for m in methods])
+
+
+def pool_pruner(repo: EvaluationRepositoryCollection) -> EnsembleScorerMaxModels:
+    """TabArena's ensemble scorer, used only for its `filter_models` pruning.
+
+    "auto" is AutoGluon's rule: 1 to 12 configs per method, by dataset size.
+    """
+    return EnsembleScorerMaxModels(
+        repo=repo, task_metrics_metadata={}, max_models_per_type="auto"
+    )
+
+
+def pruned_pool_configs(pruner, metrics: pd.DataFrame, dataset: str, fold: int) -> list[str]:
+    """The task's configs that the pruning keeps, in sorted order."""
+    configs = sorted(metrics.loc[(dataset, fold)].index)
+    kept = set(pruner.filter_models(dataset=dataset, fold=fold, models=configs))
+    return [config for config in configs if config in kept]
 
 
 def classification_datasets(repo) -> list[str]:

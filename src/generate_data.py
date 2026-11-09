@@ -32,6 +32,7 @@ import time
 import argparse
 
 from fast_metrics import FastRocAuc
+from sparse_qdo_es import SparseQDOEnsembleSelection
 from tabarena_data import (
     CLASSIFICATION_PROBLEM_TYPES,
     DEFAULT_FOLDS,
@@ -432,11 +433,15 @@ def save_performances(
 
 
 def load_and_process_base_models(
-    metrics, repo: EvaluationRepositoryCollection, dataset, fold, df_usage
+    metrics, repo: EvaluationRepositoryCollection, dataset, fold, df_usage, configs=None
 ):
-    # Only use the configs that have results for this task
+    """Base models of a task: `configs` (a pool), or by default every config with results for it.
+
+    Without `df_usage` the memory and disk metadata are 0, for pools with no such measurements.
+    """
     task_metrics = metrics.loc[(dataset, fold)]
-    configs = list(task_metrics.index)
+    if configs is None:
+        configs = list(task_metrics.index)
 
     # Binary predictions are returned as (n_configs, n_rows, 2) like the multiclass ones
     predictions_val = repo.predict_val_multi(
@@ -465,8 +470,10 @@ def load_and_process_base_models(
         time_train_s = task_metrics.loc[config, "time_train_s"]
         config_type = config_types[i]
 
-        memory_used, disk_space_used = config_resource_usage(
-            df_usage, config, config_type
+        memory_used, disk_space_used = (
+            (0.0, 0.0)
+            if df_usage is None
+            else config_resource_usage(df_usage, config, config_type)
         )
 
         # Wrap predictions in the FakedFittedAndValidatedClassificationBaseModel
@@ -550,13 +557,16 @@ def evaluate_single_best_model(
 _task_data: dict = {}
 
 
-def _build_ensemble(method: str, base_models, metric, random_seed: int):
+def _build_ensemble(method: str, base_models, metric, random_seed: int, n_iterations: int | None = None):
     """Create the ensemble method `method`. phem's own multiprocessing is disabled (n_jobs=1)
-    because the ensembles of a task are already fitted in parallel."""
+    because the ensembles of a task are already fitted in parallel.
+
+    `n_iterations` replaces the experiments' budget: 100 for GES and 3 (times the pool size) for QDO.
+    """
     if method in ("GES", "MULTI_GES"):
         return EnsembleSelection(
             base_models=base_models,
-            n_iterations=100,
+            n_iterations=100 if n_iterations is None else n_iterations,
             metric=metric,
             random_state=random_seed,
             n_jobs=1,
@@ -564,7 +574,7 @@ def _build_ensemble(method: str, base_models, metric, random_seed: int):
 
     qdo_kwargs = dict(
         base_models=base_models,
-        n_iterations=3,
+        n_iterations=3 if n_iterations is None else n_iterations,
         score_metric=metric,
         random_state=random_seed,
         n_jobs=1,
@@ -584,16 +594,28 @@ def _build_ensemble(method: str, base_models, metric, random_seed: int):
     # QDO with a hardware cost metric and loss correlation
     cost_behavior_spaces = {
         "INFER_TIME_QDO": ("test_predict_time", get_custom_behavior_space_with_inference_time),
+        "INFER_TIME_QDO_3_BATCHES": ("test_predict_time", get_custom_behavior_space_with_inference_time),
+        "INFER_TIME_QDO_SPARSE_P20": ("test_predict_time", get_custom_behavior_space_with_inference_time),
         "MEMORY_QDO": ("memory", get_custom_behavior_space_with_memory_usage),
         "DISK_QDO": ("diskspace", get_custom_behavior_space_with_disk_usage),
     }
     metadata_key, get_behavior_space = cost_behavior_spaces[method]
     max_possible_ensemble_cost = sum(bm.model_metadata[metadata_key] for bm in base_models)
-    return QDOEnsembleSelection(
+    behavior_kwargs = dict(
         behavior_space=get_behavior_space(max_possible_ensemble_cost),
         base_models_metadata_type="custom",
-        **qdo_kwargs,
     )
+    if method == "INFER_TIME_QDO_SPARSE_P20":
+        # The emitter's removal_probability defaults to 0.2
+        return SparseQDOEnsembleSelection(
+            fixed_sparse_probability=True, **behavior_kwargs, **qdo_kwargs
+        )
+    ensemble = QDOEnsembleSelection(**behavior_kwargs, **qdo_kwargs)
+    if method == "INFER_TIME_QDO_3_BATCHES":
+        # The single models, then 3 batches, whatever the pool size. phem derives the number of
+        # batches from n_evaluations after it has scored the single models.
+        ensemble.n_evaluations = ensemble.n_base_models + 3 * ensemble.batch_size
+    return ensemble
 
 
 def _run_job(job: tuple[str, float | None]):
