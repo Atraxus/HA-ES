@@ -51,19 +51,27 @@ def _download_processed_s3(downloader: MethodDownloaderS3, method_metadata):
 
 
 def download_processed(method_metadata, retries: int):
-    for attempt in range(1, retries + 1):
-        try:
-            downloader = method_metadata.method_downloader()
-            if isinstance(downloader, MethodDownloaderS3):
-                _download_processed_s3(downloader, method_metadata)
-            else:
-                downloader.download_processed()
-            return
-        except Exception as e:
-            if attempt == retries:
-                raise
-            print(f"\tAttempt {attempt}/{retries} failed ({e}), retrying ...")
-            time.sleep(30)
+    # Both downloaders write the zip to a temporary file. Put it next to the destination rather
+    # than in /tmp, which may be too small for it (e.g. on a cluster's login node).
+    dest_parent = Path(method_metadata.path_processed).parent
+    dest_parent.mkdir(parents=True, exist_ok=True)
+    default_tempdir, tempfile.tempdir = tempfile.tempdir, str(dest_parent)
+    try:
+        for attempt in range(1, retries + 1):
+            try:
+                downloader = method_metadata.method_downloader()
+                if isinstance(downloader, MethodDownloaderS3):
+                    _download_processed_s3(downloader, method_metadata)
+                else:
+                    downloader.download_processed()
+                return
+            except Exception as e:
+                if attempt == retries:
+                    raise
+                print(f"\tAttempt {attempt}/{retries} failed ({e}), retrying ...")
+                time.sleep(30)
+    finally:
+        tempfile.tempdir = default_tempdir
 
 
 def main(methods: list[str], retries: int = 3):
