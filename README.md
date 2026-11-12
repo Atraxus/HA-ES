@@ -41,11 +41,16 @@ The base models are the configs of the TabArena methods listed in `DEFAULT_METHO
 
 The memory and disk usage of each config is not part of TabArena. It is measured on dummy data by fitting every config with AutoGluon, which needs the model libraries of the `measure` dependency group:
 - `uv sync --group measure`
-- `uv run python src/config_stats.py`
+- `uv run python src/config_stats.py`, or on a Slurm cluster `sbatch config_stats_job.sh`
 
-which writes `data/model_memory_and_disk_usage.csv`. The dummy data is seeded, so runs are reproducible, but keep the CPU count fixed between runs you compare: AutoGluon sizes the models' thread pools by it, which changes the inference memory of some models. Configs without a measurement fall back to the median of their model type. Without the file, `generate_data.py` skips Memory-QDO and Disk-QDO and runs the other methods. The `Dockerfile` runs the same script in a container.
+which writes `data/model_memory_and_disk_usage.csv`. It takes about an hour on 16 CPUs. The dummy data is seeded, so runs are reproducible, but keep the CPU count fixed between runs you compare: AutoGluon sizes the models' thread pools by it, which changes the inference memory of some models. Configs without a measurement fall back to the median of their model type. Without the file, `generate_data.py` skips Memory-QDO and Disk-QDO and runs the other methods. The `Dockerfile` runs the same script in a container.
 
 The memory cost of a config is the increase in resident memory of a fresh process from loading the fitted model and predicting, measured after a warm-up load so that library code shared by all ensemble members is not attributed to each model (`src/memory_probe.py`, Linux only). Each config is fitted with the model class TabArena benchmarked it with.
+
+### Slurm (ZIB z3)
+The job scripts (`single_run_job.sh`, `inference_pareto_job.sh`, `config_stats_job.sh`) use the partition `small`, which allows one node, 50 hours and 3000 MB per CPU; set `SBATCH_PARTITION` for another one. They read the TabArena store from `/scratch/htc/$USER/tabarena`, since it does not fit the home quota (50 GB), unless `TABARENA_CACHE` is set. Download the data there from the login node before submitting:
+- `export TABARENA_CACHE=/scratch/htc/$USER/tabarena`
+- `uv run python src/download_data.py`
 
 ### Run
 To run the experiments for one seed use
@@ -67,8 +72,6 @@ In the code used for the publications, the Multi-GES weights were fitted one aft
 
 It needs the plotting dependencies and the methods of `PARETO_POOLS` in `src/tabarena_data.py`. No memory or disk measurements are needed. To run seed 0 on a Slurm cluster (one array element per dataset and repeat that fits all seeds, then a job that merges them and draws the plot), run this from the project root:
 - `uv sync --group notebooks`
-- replace `YOUR_PARTITION` in `inference_pareto_job.sh` with your Slurm partition
-- `export TABARENA_CACHE=/path/to/tabarena/store`
 - `bash inference_pareto_job.sh`
 
 For one dataset without Slurm, use `uv run python src/inference_pareto.py run --datasets blood-transfusion-service-center` and then `uv run python src/inference_pareto.py aggregate`. Results are written to `results/inference_pareto/`, the points and leaderboard to `data/inference_pareto_*.csv`, and the figure to `plots/inference-pareto-mean-time.png`. `data/` and `plots/` are not tracked; the figure and both CSVs of the seed 0 run on all 38 datasets are kept in `docs/inference_pareto/`.

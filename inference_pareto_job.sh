@@ -6,14 +6,13 @@
 #SBATCH --time=1-00:00:00
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=32GB
-#SBATCH --partition=YOUR_PARTITION
+#SBATCH --partition=small
 
 # Inference time against test Elo on the pruned cross-family and foundation-model pools
 # (src/inference_pareto.py). One array element per classification dataset and repeat of --folds
 # fits every seed, so each task is loaded and pruned once for all seeds; then one job merges them
-# and draws the plot. Replace YOUR_PARTITION (twice) with your Slurm partition, then start it
-# from the project root, not with sbatch:
-#   export TABARENA_CACHE=/path/to/tabarena/store
+# and draws the plot. Start it from the project root, not with sbatch (set SBATCH_PARTITION for
+# another partition than small):
 #   bash inference_pareto_job.sh [--seed S [S ...]] [--folds 0 1 2] [--steps 40]
 # Several seeds are averaged per task by the aggregate job. Elements skip the seeds whose results
 # exist, so resubmitting reruns only what is missing.
@@ -25,7 +24,8 @@ set -eo pipefail
 N_DATASETS=38
 FOLDS_PER_REPEAT=3
 
-: "${TABARENA_CACHE:?Set TABARENA_CACHE to the TabArena store}"
+# The TabArena store is too large for the home quota
+export TABARENA_CACHE=${TABARENA_CACHE:-/scratch/htc/$USER/tabarena}
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMBA_NUM_THREADS=1
 export MPLBACKEND=Agg
 
@@ -63,8 +63,8 @@ if [ -z "$SLURM_ARRAY_TASK_ID" ]; then
     ARRAY_JOB=$(sbatch --parsable --array=0-$((N_DATASETS * N_REPEATS - 1)) "$0" \
         --seed "${SEEDS[@]}" --folds "${FOLDS[@]}" "${RUN_ARGS[@]}")
     AGGREGATE_JOB=$(sbatch --parsable --dependency=afterok:"$ARRAY_JOB" \
-        --job-name=inference_pareto_aggregate --partition=YOUR_PARTITION --time=01:00:00 \
-        --cpus-per-task=4 --mem=48G --output=logs/inference_pareto_aggregate_%j.out \
+        --job-name=inference_pareto_aggregate --partition="${SBATCH_PARTITION:-small}" --time=01:00:00 \
+        --cpus-per-task=17 --mem=48G --output=logs/inference_pareto_aggregate_%j.out \
         --wrap "source .venv/bin/activate && python src/inference_pareto.py aggregate --seed ${SEEDS[*]} ${AGGREGATE_ARGS[*]}")
     echo "Submitted array $ARRAY_JOB ($((N_DATASETS * N_REPEATS)) elements) and aggregate $AGGREGATE_JOB"
     exit 0
