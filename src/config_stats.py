@@ -44,12 +44,14 @@ def parse_args():
     return parser.parse_args()
 
 
-def create_dummy_data(num_samples: int = 500, num_features: int = 15):
+def create_dummy_data(num_samples: int = 500, num_features: int = 15, seed: int = 0):
+    # Seeded, so that every run measures models fitted on the same data
+    rng = np.random.default_rng(seed)
     X_dummy = pd.DataFrame(
-        np.random.random((num_samples, num_features)),
+        rng.random((num_samples, num_features)),
         columns=[f"feature_{i}" for i in range(num_features)],
     )
-    X_dummy["target"] = np.random.randint(2, size=num_samples)
+    X_dummy["target"] = rng.integers(2, size=num_samples)
 
     # Split into train and test sets
     train_data = X_dummy.sample(frac=0.8, random_state=42)

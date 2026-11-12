@@ -43,7 +43,7 @@ The memory and disk usage of each config is not part of TabArena. It is measured
 - `uv sync --group measure`
 - `uv run python src/config_stats.py`
 
-which writes `data/model_memory_and_disk_usage.csv`. Configs without a measurement fall back to the median of their model type. Without the file, `generate_data.py` skips Memory-QDO and Disk-QDO and runs the other methods. The `Dockerfile` runs the same script in a container.
+which writes `data/model_memory_and_disk_usage.csv`. The dummy data is seeded, so runs are reproducible, but keep the CPU count fixed between runs you compare: AutoGluon sizes the models' thread pools by it, which changes the inference memory of some models. Configs without a measurement fall back to the median of their model type. Without the file, `generate_data.py` skips Memory-QDO and Disk-QDO and runs the other methods. The `Dockerfile` runs the same script in a container.
 
 The memory cost of a config is the increase in resident memory of a fresh process from loading the fitted model and predicting, measured after a warm-up load so that library code shared by all ensemble members is not attributed to each model (`src/memory_probe.py`, Linux only). Each config is fitted with the model class TabArena benchmarked it with.
 
