@@ -43,7 +43,7 @@ The memory and disk usage of each config is not part of TabArena. It is measured
 - `uv sync --group measure`
 - `uv run python src/config_stats.py`
 
-which writes `data/model_memory_and_disk_usage.csv`. Configs without a measurement fall back to the median of their model type. The `Dockerfile` runs the same script in a container.
+which writes `data/model_memory_and_disk_usage.csv`. Configs without a measurement fall back to the median of their model type. Without the file, `generate_data.py` skips Memory-QDO and Disk-QDO and runs the other methods. The `Dockerfile` runs the same script in a container.
 
 The memory cost of a config is the increase in resident memory of a fresh process from loading the fitted model and predicting, measured after a warm-up load so that library code shared by all ensemble members is not attributed to each model (`src/memory_probe.py`, Linux only). Each config is fitted with the model class TabArena benchmarked it with.
 
@@ -51,19 +51,21 @@ The memory cost of a config is the increase in resident memory of a fresh proces
 To run the experiments for one seed use
 - `uv run python src/generate_data.py --seed 0`
 
+Several seeds (`--seed 0 1 2`) are fitted on each task after loading it once. Results that already exist are skipped, so delete them to recompute.
+
 For a quick test, restrict the methods, datasets and folds, e.g.
 - `uv run python src/generate_data.py --methods ExtraTrees --folds 0 --datasets blood-transfusion-service-center`
 
-The ensembles of a task are fitted in parallel on all available CPUs (set the number with `--n-jobs`). A task consists of 28 ensemble fits, 21 of which (GES and Multi-GES) take similarly long, so 7 or 11 CPUs are used most efficiently.
+The ensembles of a task are fitted in parallel on all available CPUs (set the number with `--n-jobs`). A task consists of 27 ensemble fits per seed, 20 of which (GES and Multi-GES) take similarly long, so with one seed 10 or 20 CPUs are used most efficiently, and with three seeds 20 or 30. Multi-GES with weight 0 is GES and is not fitted, except with `--legacy-multi-ges`.
 
 In the code used for the publications, the Multi-GES weights were fitted one after another with the same ensemble object, which limited each weight to the best iteration of the previous weight instead of 100 iterations. This is fixed; `--legacy-multi-ges` reproduces the previous behavior.
 
-`single_run_job.sh` and `multiple_runs_job.sh` run seeds 0-9 on a Slurm cluster. Afterwards, `check_results.py` lists missing result files and `src/process_data.py` aggregates the results into `data/`, which the notebooks in `notebooks/` use for plotting.
+`bash multiple_runs_job.sh` runs seeds 0-9 on a Slurm cluster (arguments such as `--seed` or `--folds` are passed to `generate_data.py`). It submits `single_run_job.sh` as one array with an element per classification dataset and repeat of `--folds` (TabArena's splits 0-2 are repeat 0, 3-5 repeat 1, ...), which fits all seeds. Every element loads TabArena's metadata and labels, while each task's predictions are read by one element only, once for all seeds; for shorter jobs, `--split-folds` gives each fold its own element and `--seeds-per-job N` splits the seeds into groups of N, at the cost of loading the metadata, and a task's predictions, once per element. Set the time limit with e.g. `SBATCH_TIMELIMIT=06:00:00`. A resubmission reruns only the missing results. Afterwards, `check_results.py` lists missing result files and `src/process_data.py` aggregates the results into `data/`, which the notebooks in `notebooks/` use for plotting.
 
 ### Inference time against performance on pruned pools
 `src/inference_pareto.py` compares Infer-QDO-ES (full budget, 3 batches, and sparse with a static removal probability of 20%), GES, QO-ES, QDO-ES and each family's best config on validation, by test Elo against the ensemble's inference time. It runs on two pools, the 9 classic methods and the 12 foundation models, each pruned with TabArena's `EnsembleScorerMaxModels`, on the classification datasets and with ROC AUC. Every search gets 40 steps times the pool size (`--steps`), except the 3-batch variant, which always gets the single models plus 3 batches of 40. TabArena's `compare` scores all entrants in one run, with RandomForest's default at Elo 1000, so Elos are only comparable within one `aggregate`.
 
-It needs the plotting dependencies and the methods of `PARETO_POOLS` in `src/tabarena_data.py`. No memory or disk measurements are needed. To run seed 0 on a Slurm cluster (one array element per dataset, then a job that merges them and draws the plot), run this from the project root:
+It needs the plotting dependencies and the methods of `PARETO_POOLS` in `src/tabarena_data.py`. No memory or disk measurements are needed. To run seed 0 on a Slurm cluster (one array element per dataset and repeat that fits all seeds, then a job that merges them and draws the plot), run this from the project root:
 - `uv sync --group notebooks`
 - replace `YOUR_PARTITION` in `inference_pareto_job.sh` with your Slurm partition
 - `export TABARENA_CACHE=/path/to/tabarena/store`
@@ -71,7 +73,7 @@ It needs the plotting dependencies and the methods of `PARETO_POOLS` in `src/tab
 
 For one dataset without Slurm, use `uv run python src/inference_pareto.py run --datasets blood-transfusion-service-center` and then `uv run python src/inference_pareto.py aggregate`. Results are written to `results/inference_pareto/`, the points and leaderboard to `data/inference_pareto_*.csv`, and the figure to `plots/inference-pareto-mean-time.png`. `data/` and `plots/` are not tracked; the figure and both CSVs of the seed 0 run on all 38 datasets are kept in `docs/inference_pareto/`.
 
-For several seeds, use `bash inference_pareto_job.sh --seed 0 1 2 3 4 5 6 7 8 9`, or `aggregate --seed 0 1 2` on finished runs. Each seed's fronts are built separately, then each entrant's error and inference time are averaged per task over the seeds and scored in one `compare` run. All seeds must cover the same tasks. The outputs get the suffix `_<n>_seeds` (`-<n>-seeds` for the figure), so they do not replace a single seed's.
+For several seeds, use `bash inference_pareto_job.sh --seed 0 1 2 3 4 5 6 7 8 9`, or `aggregate --seed 0 1 2` on finished runs. Each task is loaded, pruned and scored for the family rows once for all seeds, and seeds whose results exist are skipped. Results are written per repeat (`seed_<S>/<dataset>/repeat_<R>/`); move results of the earlier per-dataset layout (`seed_<S>/<dataset>/`) into `repeat_0/` before mixing them with new runs. Each seed's fronts are built separately, then each entrant's error and inference time are averaged per task over the seeds and scored in one `compare` run. All seeds must cover the same tasks. The outputs get the suffix `_<n>_seeds` (`-<n>-seeds` for the figure), so they do not replace a single seed's.
 
 ## Relevant Publications
 If you use HAPEns or HA-ES in scientific publications, we would appreciate citations.

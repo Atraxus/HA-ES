@@ -66,6 +66,7 @@ PARETO_METHOD_SUITES = {
 
 # TabArena numbers the splits of a dataset (repeats x folds) as folds; 0-2 are the folds of the first repeat.
 DEFAULT_FOLDS = [0, 1, 2]
+FOLDS_PER_REPEAT = 3
 
 CLASSIFICATION_PROBLEM_TYPES = ("binary", "multiclass")
 
@@ -129,6 +130,43 @@ def initialize_tasks(repo, datasets: list[str], folds: list[int]) -> list[str]:
         for fold in folds
         if fold in repo.dataset_to_folds(dataset)
     ]
+
+
+def array_element(
+    datasets: list[str],
+    folds: list[int],
+    index: int,
+    *,
+    seeds: list[int] = (),
+    split_folds: bool = False,
+    seeds_per_job: int | None = None,
+) -> tuple[str, list[int], list[int]]:
+    """The dataset, folds and seeds of SLURM array element `index`.
+
+    By default an element is one dataset and one repeat with all `seeds`; `split_folds` gives each
+    fold its own element and `seeds_per_job` splits the seeds into groups of that size. Elements
+    are ordered by dataset, then fold group, then seed group. A repeat or fold the dataset does not
+    have leaves the element without tasks (TabArena's small datasets have 10 repeats, the others
+    3). Every element loads the repo's metadata and labels once, and a task's predictions are read
+    once per element that holds the task, however many of its seeds that element fits.
+    """
+    if split_folds:
+        fold_groups = [[fold] for fold in folds]
+    else:
+        repeats = sorted({fold // FOLDS_PER_REPEAT for fold in folds})
+        fold_groups = [[f for f in folds if f // FOLDS_PER_REPEAT == r] for r in repeats]
+    seeds = list(seeds)
+    size = seeds_per_job or max(len(seeds), 1)
+    seed_groups = [seeds[i : i + size] for i in range(0, len(seeds), size)] or [[]]
+    n_elements = len(datasets) * len(fold_groups) * len(seed_groups)
+    if not 0 <= index < n_elements:
+        raise IndexError(
+            f"Array index {index} out of range for {len(datasets)} datasets x "
+            f"{len(fold_groups)} fold groups x {len(seed_groups)} seed groups"
+        )
+    index, seed_group = divmod(index, len(seed_groups))
+    dataset, fold_group = divmod(index, len(fold_groups))
+    return datasets[dataset], fold_groups[fold_group], seed_groups[seed_group]
 
 
 def config_metadata(config_type: str, hyperparameters: dict) -> dict:

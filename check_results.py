@@ -36,8 +36,8 @@ basic_methods = [
     'GES',
 ]
 
-# Generate MULTI_GES methods with 20 samples from 0 to 1
-multi_ges_methods = [f"MULTI_GES-{t:.2f}" for t in np.linspace(0, 1, 20)]
+# MULTI_GES methods with 20 samples from 0 to 1, without weight 0 (identical to GES, not fitted)
+multi_ges_methods = [f"MULTI_GES-{t:.2f}" for t in np.linspace(0, 1, 20)[1:]]
 
 # Combine all methods
 methods = basic_methods + multi_ges_methods

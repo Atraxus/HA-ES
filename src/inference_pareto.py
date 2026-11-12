@@ -13,9 +13,10 @@ GES, QO-ES and QDO-ES return one ensemble per task and are single points, as is 
 config on validation. TabArena's ``compare`` scores every entrant in one run with RandomForest's
 default at 1000. Elo is relative to the entrants, so compare results only within one ``aggregate``.
 
-``run`` handles one dataset and seed, so a SLURM array per seed covers the datasets
-(``inference_pareto_job.sh``); ``aggregate`` merges them, scores and plots. Given several seeds, it
-averages each entrant's error and time per task over the seeds and scores the averages in one run.
+``run`` handles one dataset and repeat per SLURM array element (``inference_pareto_job.sh``) and
+fits every seed on each task, so a task's pruning, predictions and family rows are loaded once for
+all seeds. ``aggregate`` merges the elements, scores and plots. Given several seeds, it averages
+each entrant's error and time per task over the seeds and scores the averages in one run.
 Run from the repository root.
 """
 
@@ -47,7 +48,9 @@ from plot_inference_pareto import (
 )
 from tabarena_data import (
     DEFAULT_FOLDS,
+    FOLDS_PER_REPEAT,
     PARETO_POOLS,
+    array_element,
     classification_datasets,
     get_context,
     initialize_tasks,
@@ -85,11 +88,12 @@ REFERENCE_NAME = "RF (default)"
 _DISPLAY_NAMES = {"RealMLP_GPU": "RealMLP-GPU"}
 
 
-def _fit_search(algorithm: str) -> list[dict[str, object]]:
-    """Fit one search on the current task and return one row per ensemble it found."""
+def _fit_search(job: tuple[int, str]) -> list[dict[str, object]]:
+    """Fit one search with one seed on the current task and return one row per ensemble it found."""
+    seed, algorithm = job
     d = _task_data
     ensemble = _build_ensemble(
-        _METHODS[algorithm], d["base_models"], d["metric"], d["seed"], n_iterations=d["steps"]
+        _METHODS[algorithm], d["base_models"], d["metric"], seed, n_iterations=d["steps"]
     )
     ensemble.ensemble_fit(d["predictions_val"], d["y_val"])
     if algorithm in BASELINE_METHODS:
@@ -110,6 +114,7 @@ def _fit_search(algorithm: str) -> list[dict[str, object]]:
         members = np.flatnonzero(vector)
         rows.append(
             {
+                "seed": seed,
                 "algorithm": algorithm,
                 "ensemble": index,
                 "metric_error": float(error_test),
@@ -168,9 +173,10 @@ def family_rows(
 
 
 def evaluate_task(
-    pool, repo, methods, pruner, metrics, task, *, seed, steps, n_jobs, warm_up
+    pool, repo, methods, pruner, metrics, task, *, seeds, steps, n_jobs, warm_up
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Every ensemble the searches find on one task, and the task's family rows."""
+    """Every ensemble the searches find on one task with each of `seeds` (column ``seed``), and
+    the task's family rows, which do not depend on the seed."""
     dataset = repo.task_to_dataset(task)
     fold = repo.task_to_fold(task)
     configs = pruned_pool_configs(pruner, metrics, dataset, fold)
@@ -192,21 +198,20 @@ def evaluate_task(
         y_val=y_val,
         y_test=y_test,
         metric=metric,
-        seed=seed,
         steps=steps,
         times=np.array([model.model_metadata["test_predict_time"] for model in base_models]),
     )
-    algorithms = list(_METHODS)
+    jobs = [(seed, algorithm) for algorithm in _METHODS for seed in seeds]
     try:
         if n_jobs == 1:
-            per_search = [_fit_search(algorithm) for algorithm in algorithms]
+            per_search = [_fit_search(job) for job in jobs]
         else:
             # Forked workers share the task data with the main process instead of copying it
             with ProcessPoolExecutor(
-                max_workers=min(n_jobs, len(algorithms)),
+                max_workers=min(n_jobs, len(jobs)),
                 mp_context=multiprocessing.get_context("fork"),
             ) as executor:
-                per_search = list(executor.map(_fit_search, algorithms))
+                per_search = list(executor.map(_fit_search, jobs))
     finally:
         _task_data.clear()
     identity = {
@@ -224,32 +229,54 @@ def evaluate_task(
     return ensembles, families
 
 
+def element_dir(output_root: Path, seed: int, dataset: str, folds: list[int]) -> Path:
+    """Where ``run`` writes the results of one seed on one repeat of a dataset."""
+    return output_root / f"seed_{seed}" / dataset / f"repeat_{folds[0] // FOLDS_PER_REPEAT}"
+
+
 def run(
     *,
     datasets: list[str] | None,
-    dataset_index: int | None,
+    array_index: int | None,
     folds: list[int],
-    seed: int,
+    seeds: list[int],
     steps: int,
     n_jobs: int,
     output_root: Path,
 ) -> None:
-    """Find the ensembles of the selected datasets on both pools."""
+    """Find the ensembles of the selected datasets on both pools, per dataset and repeat.
+
+    Seeds whose results of a repeat exist are skipped, and a repeat with none left is not loaded.
+    """
     repos = {pool: load_pool_repo(methods) for pool, methods in PARETO_POOLS.items()}
     shared = sorted(set.intersection(*(set(classification_datasets(r)) for r in repos.values())))
-    if dataset_index is not None:
-        datasets = [shared[dataset_index]]
-    elif datasets is None:
-        datasets = shared
-    for dataset in datasets:
+    if array_index is not None:
+        dataset, element_folds, _ = array_element(datasets or shared, folds, array_index)
+        elements = [(dataset, element_folds)]
+    else:
+        repeats = sorted({fold // FOLDS_PER_REPEAT for fold in folds})
+        elements = [
+            (dataset, [f for f in folds if f // FOLDS_PER_REPEAT == repeat])
+            for dataset in datasets or shared
+            for repeat in repeats
+        ]
+    for dataset, element_folds in elements:
+        pending = [
+            seed
+            for seed in seeds
+            if not (element_dir(output_root, seed, dataset, element_folds) / FAMILIES_FILE).exists()
+        ]
+        if not pending:
+            print(f"All seeds of {dataset}, folds {element_folds} exist", flush=True)
+            continue
         ensembles: list[dict[str, object]] = []
         families: list[dict[str, object]] = []
         for pool, methods in PARETO_POOLS.items():
             repo = repos[pool]
-            metrics = repo.metrics(datasets=[dataset], folds=folds).sort_index()
+            metrics = repo.metrics(datasets=[dataset], folds=element_folds).sort_index()
             pruner = pool_pruner(repo)
-            for i, task in enumerate(initialize_tasks(repo, [dataset], folds)):
-                print(f"{pool}: {task}", flush=True)
+            for i, task in enumerate(initialize_tasks(repo, [dataset], element_folds)):
+                print(f"{pool}: {task}, seeds {pending}", flush=True)
                 task_ensembles, task_families = evaluate_task(
                     pool,
                     repo,
@@ -257,17 +284,24 @@ def run(
                     pruner,
                     metrics,
                     task,
-                    seed=seed,
+                    seeds=pending,
                     steps=steps,
                     n_jobs=n_jobs,
                     warm_up=i == 0,
                 )
                 ensembles.extend(task_ensembles)
                 families.extend(task_families)
-        output_dir = output_root / f"seed_{seed}" / dataset
-        output_dir.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(ensembles).to_parquet(output_dir / ENSEMBLES_FILE, index=False)
-        pd.DataFrame(families).to_parquet(output_dir / FAMILIES_FILE, index=False)
+        if not families:
+            # A repeat the dataset does not have
+            continue
+        ensembles_df = pd.DataFrame(ensembles)
+        for seed in pending:
+            output_dir = element_dir(output_root, seed, dataset, element_folds)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            seed_ensembles = ensembles_df[ensembles_df["seed"] == seed].drop(columns="seed")
+            seed_ensembles.to_parquet(output_dir / ENSEMBLES_FILE, index=False)
+            # Written last: its existence marks the seed as done
+            pd.DataFrame(families).to_parquet(output_dir / FAMILIES_FILE, index=False)
 
 
 def validation_front(ensembles: pd.DataFrame) -> pd.DataFrame:
@@ -394,18 +428,25 @@ def pareto_points(
 
 
 def seed_entrants(seed: int, output_root: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """One seed's per-split entrant rows and family rows, merged over its per-dataset jobs."""
+    """One seed's per-split entrant rows and family rows, merged over its array elements."""
     element_dirs = sorted(
-        path.parent for path in (output_root / f"seed_{seed}").glob(f"*/{ENSEMBLES_FILE}")
+        path.parent for path in (output_root / f"seed_{seed}").rglob(FAMILIES_FILE)
     )
     if not element_dirs:
-        raise FileNotFoundError(f"No {ENSEMBLES_FILE} under {output_root}/seed_{seed}")
+        raise FileNotFoundError(f"No {FAMILIES_FILE} under {output_root}/seed_{seed}")
     ensembles = pd.concat(
         [pd.read_parquet(d / ENSEMBLES_FILE) for d in element_dirs], ignore_index=True
     )
     family = pd.concat(
         [pd.read_parquet(d / FAMILIES_FILE) for d in element_dirs], ignore_index=True
     )
+    duplicated = family[family.duplicated(["pool", "method", "dataset", "fold"])]
+    if not duplicated.empty:
+        raise ValueError(
+            f"Tasks stored by several elements under {output_root}/seed_{seed}, e.g. "
+            f"{sorted(set(zip(duplicated['dataset'], duplicated['fold'])))[:5]}; results of the "
+            "earlier per-dataset layout (<dataset>/ instead of <dataset>/repeat_<r>/) may remain"
+        )
     is_search = ensembles["algorithm"].isin(SEARCH_METHODS)
     entrants = pd.concat(
         [
@@ -479,13 +520,18 @@ def main() -> None:
     run_parser = commands.add_parser("run", help="Find the ensembles on the selected datasets")
     run_parser.add_argument("--datasets", nargs="+", default=None)
     run_parser.add_argument(
-        "--dataset-index",
+        "--array-index",
         type=int,
         default=None,
-        help="Run only the n-th classification dataset (for a SLURM array).",
+        help=(
+            "Run only one SLURM array element: one dataset (of --datasets, by default the shared "
+            "classification datasets) and one repeat of --folds, indexed by dataset, then repeat."
+        ),
     )
     run_parser.add_argument("--folds", nargs="+", type=int, default=DEFAULT_FOLDS)
-    run_parser.add_argument("--seed", type=int, default=0)
+    run_parser.add_argument(
+        "--seed", type=int, nargs="+", default=[0], help="Each task is loaded once for all seeds."
+    )
     run_parser.add_argument("--steps", type=int, default=ENSEMBLE_STEPS)
     run_parser.add_argument("--n-jobs", type=int, default=1)
     run_parser.add_argument("--output-root", type=Path, default=RESULTS_ROOT)
@@ -501,9 +547,9 @@ def main() -> None:
     if args.command == "run":
         run(
             datasets=args.datasets,
-            dataset_index=args.dataset_index,
+            array_index=args.array_index,
             folds=args.folds,
-            seed=args.seed,
+            seeds=args.seed,
             steps=args.steps,
             n_jobs=args.n_jobs,
             output_root=args.output_root,

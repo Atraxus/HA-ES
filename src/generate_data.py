@@ -37,6 +37,7 @@ from tabarena_data import (
     CLASSIFICATION_PROBLEM_TYPES,
     DEFAULT_FOLDS,
     DEFAULT_METHODS,
+    array_element,
     categorical_if_mixed,
     classification_datasets,
     config_metadata,
@@ -49,10 +50,14 @@ from tabarena_data import (
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run ensemble evaluations with a specific seed."
+        description="Run ensemble evaluations with the given seeds."
     )
     parser.add_argument(
-        "--seed", type=int, default=0, help="Seed for RNG initialization."
+        "--seed",
+        type=int,
+        nargs="+",
+        default=[0],
+        help="Seeds for RNG initialization. Each task is loaded once and fitted for every seed.",
     )
     parser.add_argument(
         "--methods",
@@ -87,6 +92,27 @@ def parse_args():
         nargs="+",
         default=None,
         help="Restrict to these datasets (default: all classification datasets).",
+    )
+    parser.add_argument(
+        "--array-index",
+        type=int,
+        default=None,
+        help=(
+            "Run only one SLURM array element: one dataset (of --datasets, by default all "
+            "classification datasets) and one repeat of --folds with all seeds, indexed by "
+            "dataset, then fold group, then seed group."
+        ),
+    )
+    parser.add_argument(
+        "--split-folds",
+        action="store_true",
+        help="With --array-index: one element per fold instead of per repeat.",
+    )
+    parser.add_argument(
+        "--seeds-per-job",
+        type=int,
+        default=None,
+        help="With --array-index: split the seeds into groups of this size (default: all in one).",
     )
     return parser.parse_args()
 
@@ -451,14 +477,15 @@ def load_and_process_base_models(
         dataset=dataset, fold=fold, configs=configs, binary_as_multiclass=True
     )
 
-    config_types = [repo.config_type(config=config) for config in configs]
+    # Looked up for all configs at once: TabArena's per-config lookups list every config of the
+    # repo on each call, which took minutes per task with ~2000 configs
+    configs_type = repo.configs_type(configs=configs)
+    configs_hyperparameters = repo.configs_hyperparameters(configs=configs, include_ag_args=False)
+    config_types = [configs_type[config] for config in configs]
     # The hyperparameters compared by QDO's config space similarity, namespaced by model family
     config_dicts = categorical_if_mixed(
         [
-            config_metadata(
-                config_type,
-                repo.config_hyperparameters(config=config, include_ag_args=False) or {},
-            )
+            config_metadata(config_type, configs_hyperparameters[config] or {})
             for config, config_type in zip(configs, config_types)
         ]
     )
@@ -506,8 +533,10 @@ def evaluate_single_best_model(
     predictions_test,
     y_val,
     y_test,
-    seed: int = 1,
+    seeds: list[int],
 ):
+    """The base model with the best validation score. It does not depend on the seed, so it is
+    computed once and saved for each of `seeds`."""
     dataset = repo.task_to_dataset(task)
     fold = repo.task_to_fold(task)
 
@@ -544,13 +573,24 @@ def evaluate_single_best_model(
     performance_df["task"] = task
     performance_df["fold"] = fold
 
-    # Check and create directory if needed
-    result_path = f"results/seed_{seed}"
-    if not os.path.exists(result_path):
-        os.makedirs(result_path)
+    for seed in seeds:
+        os.makedirs(f"results/seed_{seed}", exist_ok=True)
+        performance_df.to_json(_result_path(seed, "SINGLE_BEST", task))
 
-    # Save DataFrame to JSON
-    performance_df.to_json(f"{result_path}/SINGLE_BEST_{task}.json")
+
+def _result_path(seed: int, name: str, task: str) -> str:
+    return f"results/seed_{seed}/{name}_{task}.json"
+
+
+def _job_result_paths(seed: int, method: str, time_weight: float | None, task: str) -> list[str]:
+    """The result files of a job; legacy Multi-GES (no time weight) writes every weight's file."""
+    if method != "MULTI_GES":
+        names = [method]
+    elif time_weight is None:
+        names = [f"MULTI_GES-{w:.2f}" for w in MULTI_GES_TIME_WEIGHTS]
+    else:
+        names = [f"MULTI_GES-{time_weight:.2f}"]
+    return [_result_path(seed, name, task) for name in names]
 
 
 # Data of the current task, set before the worker processes are forked so that they share it
@@ -618,10 +658,10 @@ def _build_ensemble(method: str, base_models, metric, random_seed: int, n_iterat
     return ensemble
 
 
-def _run_job(job: tuple[str, float | None]):
-    method, time_weight = job
+def _run_job(job: tuple[int, str, float | None]):
+    seed, method, time_weight = job
     d = _task_data
-    ensemble = _build_ensemble(method, d["base_models"], d["metric"], d["seed"])
+    ensemble = _build_ensemble(method, d["base_models"], d["metric"], seed)
     evaluate_ensemble(
         method,
         ensemble,
@@ -632,10 +672,10 @@ def _run_job(job: tuple[str, float | None]):
         d["y_val"],
         d["y_test"],
         d["metric"],
-        seed=d["seed"],
+        seed=seed,
         time_weight=time_weight,
     )
-    return method if time_weight is None else f"{method}-{time_weight:.2f}"
+    return seed, method if time_weight is None else f"{method}-{time_weight:.2f}"
 
 
 def _warm_up_jit(base_models, predictions_val, y_val, metric):
@@ -656,10 +696,13 @@ def _warm_up_jit(base_models, predictions_val, y_val, metric):
 
 
 def main(
-    random_seed: int = 0,
+    random_seeds: list[int] = [0],
     methods: list[str] | None = None,
     folds: list[int] = DEFAULT_FOLDS,
     datasets: list[str] | None = None,
+    array_index: int | None = None,
+    split_folds: bool = False,
+    seeds_per_job: int | None = None,
     n_jobs: int = 1,
     legacy_multi_ges: bool = False,
     run_singleBest: bool = False,
@@ -673,17 +716,30 @@ def main(
     run_disk_qdo: bool = False,
 ):
     repo = load_repo(methods)
-    if datasets is None:
+    if array_index is not None:
+        dataset, folds, random_seeds = array_element(
+            datasets or classification_datasets(repo),
+            folds,
+            array_index,
+            seeds=random_seeds,
+            split_folds=split_folds,
+            seeds_per_job=seeds_per_job,
+        )
+        datasets = [dataset]
+    elif datasets is None:
         datasets = classification_datasets(repo)
     # A task is a fold of a dataset
     tasks = initialize_tasks(repo, datasets, folds)
 
     metrics = repo.metrics(datasets=datasets, folds=folds)
-    df_usage = load_resource_usage()
-
-    def result_file_exists(method_name, extra_info=""):
-        file_path = f"results/seed_{random_seed}/{method_name}{extra_info}_{task}.json"
-        return os.path.exists(file_path)
+    # Only Memory-QDO and Disk-QDO need the memory and disk measurements; without them the other
+    # methods run with the memory and disk metadata set to 0.
+    try:
+        df_usage = load_resource_usage()
+    except FileNotFoundError as error:
+        print(f"{error}\nSkipping MEMORY_QDO and DISK_QDO.", flush=True)
+        df_usage = None
+        run_memory_qdo = run_disk_qdo = False
 
     # Ensemble methods to fit per task: (method, Multi-GES time weight). GES first, as it takes longest.
     jobs = []
@@ -694,7 +750,8 @@ def main(
             # One job fitting all weights sequentially (time_weight=None)
             jobs.append(("MULTI_GES", None))
         else:
-            jobs += [("MULTI_GES", time_weight) for time_weight in MULTI_GES_TIME_WEIGHTS]
+            # Weight 0 is GES (same ensembles and scores), so only the legacy run fits it
+            jobs += [("MULTI_GES", time_weight) for time_weight in MULTI_GES_TIME_WEIGHTS[1:]]
     for method, run in [
         ("QO", run_qo),
         ("QDO", run_qdo),
@@ -723,6 +780,26 @@ def main(
         if repo.dataset_info(dataset=dataset)["problem_type"] not in CLASSIFICATION_PROBLEM_TYPES:
             continue  # Only support classification for now
 
+        # Jobs whose results exist are skipped, and the task is not loaded if nothing is left.
+        # The seeds of a method come one after another, so GES still starts first.
+        task_jobs = [
+            (seed, method, time_weight)
+            for method, time_weight in jobs
+            for seed in random_seeds
+            if not all(
+                os.path.exists(path)
+                for path in _job_result_paths(seed, method, time_weight, task)
+            )
+        ]
+        single_best_seeds = [
+            seed
+            for seed in random_seeds
+            if run_singleBest and not os.path.exists(_result_path(seed, "SINGLE_BEST", task))
+        ]
+        if not task_jobs and not single_best_seeds:
+            print(f"All results of {task} exist", flush=True)
+            continue
+
         base_models, predictions_val, predictions_test = load_and_process_base_models(
             metrics, repo, dataset, fold, df_usage
         )
@@ -735,7 +812,7 @@ def main(
         metric = FastRocAuc(is_binary=(number_of_classes == 2), labels=labels)
 
         # Single best model evaluation
-        if run_singleBest:
+        if single_best_seeds:
             evaluate_single_best_model(
                 base_models,
                 repo,
@@ -745,18 +822,9 @@ def main(
                 predictions_test,
                 y_val,
                 y_test,
-                seed=random_seed,
+                seeds=single_best_seeds,
             )
 
-        # Multi-GES is skipped if all its results already exist
-        task_jobs = [
-            job
-            for job in jobs
-            if not (
-                job[0] == "MULTI_GES"
-                and all(result_file_exists(f"MULTI_GES-{w:.2f}") for w in MULTI_GES_TIME_WEIGHTS)
-            )
-        ]
         if not task_jobs:
             continue
 
@@ -773,7 +841,6 @@ def main(
             y_val=y_val,
             y_test=y_test,
             metric=metric,
-            seed=random_seed,
         )
         if n_jobs == 1:
             for job in task_jobs:
@@ -797,6 +864,9 @@ if __name__ == "__main__":
         methods=args.methods,
         folds=args.folds,
         datasets=args.datasets,
+        array_index=args.array_index,
+        split_folds=args.split_folds,
+        seeds_per_job=args.seeds_per_job,
         n_jobs=args.n_jobs,
         legacy_multi_ges=args.legacy_multi_ges,
         run_singleBest=True,

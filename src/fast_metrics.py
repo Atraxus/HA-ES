@@ -7,6 +7,11 @@ curve and integrating it with the trapezoidal rule) with the same numpy operatio
 order, but without the validation. The results are bit-for-bit identical, which matters because
 ensemble selection compares losses of candidate ensembles directly, so even differences in the
 last bit can change which ensemble is selected.
+
+The one difference is the sort: an unstable quicksort instead of a stable mergesort, which is
+about a quarter faster and most of the time of a fit on large datasets. The curve only reads the
+cumulative counts at the last index of each run of equal scores, which do not depend on the order
+within the run, so the results stay identical.
 """
 
 import numpy as np
@@ -20,7 +25,7 @@ def _binary_roc_auc(y_true_bool: np.ndarray, y_score: np.ndarray) -> float:
         raise ValueError("Only one class present in y_true. ROC AUC score is not defined.")
 
     # _binary_clf_curve: sort by decreasing score and count true/false positives per threshold
-    desc_score_indices = np.argsort(y_score, kind="mergesort")[::-1]
+    desc_score_indices = np.argsort(y_score, kind="quicksort")[::-1]
     y_score = y_score[desc_score_indices]
     y_true = y_true_bool[desc_score_indices]
     distinct_value_indices = np.where(np.diff(y_score))[0]
