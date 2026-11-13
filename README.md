@@ -75,6 +75,16 @@ For one dataset without Slurm, use `uv run python src/inference_pareto.py run --
 
 For several seeds, use `bash inference_pareto_job.sh --seed 0 1 2 3 4 5 6 7 8 9`, or `aggregate --seed 0 1 2` on finished runs. Each task is loaded, pruned and scored for the family rows once for all seeds, and seeds whose results exist are skipped. Results are written per repeat (`seed_<S>/<dataset>/repeat_<R>/`); move results of the earlier per-dataset layout (`seed_<S>/<dataset>/`) into `repeat_0/` before mixing them with new runs. Each seed's fronts are built separately, then each entrant's error and inference time are averaged per task over the seeds and scored in one `compare` run. All seeds must cover the same tasks. The outputs get the suffix `_<n>_seeds` (`-<n>-seeds` for the figure), so they do not replace a single seed's.
 
+#### Raw results of the 10-seed run
+The raw results behind `docs/inference_pareto/` (seeds 0-9, all 38 classification datasets, folds 0-2, both pools) are kept in `docs/inference_pareto/inference_pareto_results.zip` (12.5 MB). Extract it into `results/` from the project root:
+- `unzip docs/inference_pareto/inference_pareto_results.zip -d results`
+
+which creates `results/inference_pareto/seed_<S>/<dataset>/repeat_0/` with two files per task:
+- `ensembles.parquet`: one row per ensemble a search returned. GES, QO-ES and QDO-ES return one ensemble per fold; each Infer-QDO-ES variant returns every distinct ensemble of its final archive, of which `aggregate` keeps the validation Pareto front. Besides the task (`pool`, `dataset`, `fold`, `problem_type`, `metric`, `pool_size`) and the search (`algorithm`, `ensemble` as the index within it), a row stores the test and validation error (`metric_error`, `metric_error_val`, 1 − ROC AUC), the inference time (`time_infer_s`, the sum of the members' TabArena inference times), and the ensemble itself (`n_members`, `members` as TabArena config names, `weights`).
+- `families.parquet`: the config of each model family in the pool with the best validation error, in TabArena's result format.
+
+`aggregate` reads only these files, so the leaderboards and figures can be recomputed without the TabArena data, e.g. `uv run python src/inference_pareto.py aggregate --seed 0 1 2 3 4 5 6 7 8 9 --name ""`.
+
 ## Relevant Publications
 If you use HAPEns or HA-ES in scientific publications, we would appreciate citations.
 
