@@ -13,7 +13,7 @@ POOL_COLORS = {"cross_family": "#2a78d6", "across_foundation_models": "#eb6834"}
 PARETO_FRONT_COLOR = "#8a8984"
 
 POOL_LABELS = {
-    "cross_family": "Cross-family [pruned]",
+    "cross_family": "Classic tabular models [pruned]",
     "across_foundation_models": "Across foundation models [pruned]",
 }
 ALGORITHM_LABELS = {
@@ -58,10 +58,12 @@ _POOL_LABEL_PLACEMENT = {
     "cross_family": (0, 8, -14, "left"),
     "across_foundation_models": (4, -6, 26, "right"),
 }
-# Without MO-GES the first line is Infer-QDO-ES, which climbs into the upper corner: label below it.
+# Without MO-GES the labels sit below the 3-batch line, which every Infer-QDO-ES figure has, at the
+# point nearest a front position: (position, x offset, y offset, alignment), in points.
+_POOL_LABEL_ANCHOR = "infer_qdo_3_batches"
 _POOL_LABEL_PLACEMENT_NO_MO_GES = {
-    "cross_family": (0, 8, -14, "left"),
-    "across_foundation_models": (0, 6, -34, "left"),
+    "cross_family": (0.0, 8, -14, "left"),
+    "across_foundation_models": (0.5, 6, -34, "left"),
 }
 # Family labels sit above their star, except where that would cross a line or another label.
 _FAMILY_LABEL_DEFAULT = (0, 7, "center")
@@ -69,6 +71,7 @@ _FAMILY_LABEL_PLACEMENT = {
     "TabFM": (0, -14, "center"),
     "CatBoost": (-6, 5, "right"),
     "TabICLv2": (6, -4, "left"),
+    "TabSwift": (6, -12, "left"),
 }
 
 
@@ -197,6 +200,13 @@ def plot_inference_pareto(points: pd.DataFrame, path: Path) -> Path:
             zorder=4,
         )
     lines = points[points["position"].notna()]
+    first_algorithm = lines["algorithm"].iloc[0]
+    with_mo_ges = first_algorithm.startswith("mo_ges")
+    label_algorithm = (
+        _POOL_LABEL_ANCHOR
+        if not with_mo_ges and (lines["algorithm"] == _POOL_LABEL_ANCHOR).any()
+        else first_algorithm
+    )
     for (pool, algorithm), line in lines.groupby(["pool", "algorithm"], sort=False):
         line = line.sort_values("position")
         color = POOL_COLORS[pool]
@@ -212,17 +222,16 @@ def plot_inference_pareto(points: pd.DataFrame, path: Path) -> Path:
             markeredgewidth=0.6,
             zorder=2,
         )
-        if algorithm == lines["algorithm"].iloc[0]:
-            placement = (
-                _POOL_LABEL_PLACEMENT
-                if algorithm.startswith("mo_ges")
-                else _POOL_LABEL_PLACEMENT_NO_MO_GES
-            )
-            index, dx, dy, alignment = placement[pool]
-            first = line.iloc[index if len(line) > index else 0]
+        if algorithm == label_algorithm:
+            if with_mo_ges:
+                index, dx, dy, alignment = _POOL_LABEL_PLACEMENT[pool]
+                anchor = line.iloc[index if len(line) > index else 0]
+            else:
+                position, dx, dy, alignment = _POOL_LABEL_PLACEMENT_NO_MO_GES[pool]
+                anchor = line.loc[(line["position"] - position).abs().idxmin()]
             ax.annotate(
                 POOL_LABELS[pool].replace("foundation models", "foundation\nmodels"),
-                (first[_TIME], first["elo"]),
+                (anchor[_TIME], anchor["elo"]),
                 xytext=(dx, dy),
                 textcoords="offset points",
                 ha=alignment,

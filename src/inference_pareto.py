@@ -63,7 +63,8 @@ from tabarena_data import (
 RESULTS_ROOT = Path("results/inference_pareto")
 ENSEMBLES_FILE = "ensembles.parquet"
 FAMILIES_FILE = "families.parquet"
-FRONT_POSITIONS = tuple(float(position) for position in np.linspace(0.0, 1.0, 9))
+# Positions plotted per front, evenly spaced from the fastest ensemble to the best on validation
+FRONT_POINTS = 3
 ENSEMBLE_STEPS = 40
 METRIC_NAME = "roc_auc"
 _GROUP_COLUMNS = ["pool", "algorithm", "dataset", "fold"]
@@ -311,6 +312,13 @@ def validation_front(ensembles: pd.DataFrame) -> pd.DataFrame:
     return ordered[ordered["metric_error_val"] < previous_best]
 
 
+def front_positions(n_points: int = FRONT_POINTS) -> tuple[float, ...]:
+    """`n_points` evenly spaced positions along a front, from 0 (fastest) to 1 (best validation)."""
+    if n_points < 2:
+        raise ValueError(f"A front needs at least 2 points, got {n_points}")
+    return tuple(float(position) for position in np.linspace(0.0, 1.0, n_points))
+
+
 def entrant_name(pool: str, algorithm: str, position: float) -> str:
     return f"{POOL_LABELS[pool]} {ALGORITHM_LABELS[algorithm]} (front {position:.3f})"
 
@@ -336,7 +344,7 @@ def _entrant_row(chosen, method: str, pool: str, algorithm: str) -> dict[str, ob
     }
 
 
-def front_entrants(ensembles: pd.DataFrame, positions=FRONT_POSITIONS) -> pd.DataFrame:
+def front_entrants(ensembles: pd.DataFrame, positions: tuple[float, ...]) -> pd.DataFrame:
     """TabArena's per-split rows of every (pool, search, front position) entrant."""
     rows = []
     for (pool, algorithm, _, _), group in ensembles.groupby(_GROUP_COLUMNS, sort=False):
@@ -381,7 +389,11 @@ def check_coverage(entrants: pd.DataFrame, expected: set[tuple[str, int]]) -> No
 
 
 def pareto_points(
-    leaderboard: pd.DataFrame, searches: list[str], baselines: list[str], families: dict
+    leaderboard: pd.DataFrame,
+    searches: list[str],
+    baselines: list[str],
+    families: dict,
+    positions: tuple[float, ...],
 ) -> pd.DataFrame:
     """The plotted points: Elo and mean time of every entrant, the reference left out.
 
@@ -392,7 +404,7 @@ def pareto_points(
         (pool, algorithm, position, entrant_name(pool, algorithm, position))
         for pool in PARETO_POOLS
         for algorithm in searches
-        for position in FRONT_POSITIONS
+        for position in positions
     ]
     keys += [
         (pool, algorithm, float("nan"), baseline_name(pool, algorithm))
@@ -427,8 +439,13 @@ def pareto_points(
     )
 
 
-def seed_entrants(seed: int, output_root: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """One seed's per-split entrant rows and family rows, merged over its array elements."""
+def seed_entrants(
+    seed: int, output_root: Path, positions: tuple[float, ...], searches: list[str]
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """One seed's per-split entrant rows and family rows, merged over its array elements.
+
+    Only the searches in `searches` enter, with every baseline and family.
+    """
     element_dirs = sorted(
         path.parent for path in (output_root / f"seed_{seed}").rglob(FAMILIES_FILE)
     )
@@ -448,9 +465,10 @@ def seed_entrants(seed: int, output_root: Path) -> tuple[pd.DataFrame, pd.DataFr
             "earlier per-dataset layout (<dataset>/ instead of <dataset>/repeat_<r>/) may remain"
         )
     is_search = ensembles["algorithm"].isin(SEARCH_METHODS)
+    is_entered = ensembles["algorithm"].isin(searches)
     entrants = pd.concat(
         [
-            front_entrants(ensembles[is_search]),
+            front_entrants(ensembles[is_search & is_entered], positions),
             baseline_entrants(ensembles[~is_search]),
             family.drop(columns="pool"),
         ],
@@ -483,10 +501,30 @@ def average_over_seeds(per_seed: list[pd.DataFrame]) -> pd.DataFrame:
 
 
 def aggregate(
-    *, seeds: list[int], output_root: Path, data_dir: Path, plots_dir: Path, name: str | None
+    *,
+    seeds: list[int],
+    output_root: Path,
+    data_dir: Path,
+    plots_dir: Path,
+    name: str | None,
+    front_points: int = FRONT_POINTS,
+    searches: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Merge the per-dataset jobs of the seeds, score them once and plot."""
-    per_seed, families = zip(*(seed_entrants(seed, output_root) for seed in seeds), strict=True)
+    """Merge the per-dataset jobs of the seeds, score them once and plot.
+
+    Each search enters with `front_points` positions along its fronts; fewer entrants change the
+    others' Elo, so compare results only between runs with the same number. Likewise, only the
+    searches in `searches` (by default all of ``SEARCH_METHODS``) enter.
+    """
+    positions = front_positions(front_points)
+    searches = [
+        search
+        for search in ALGORITHM_LABELS
+        if search in SEARCH_METHODS and (searches is None or search in searches)
+    ]
+    per_seed, families = zip(
+        *(seed_entrants(seed, output_root, positions, searches) for seed in seeds), strict=True
+    )
     entrants = average_over_seeds(list(per_seed))
     family = families[0]
 
@@ -499,12 +537,13 @@ def aggregate(
     leaderboard.to_csv(data_dir / f"inference_pareto_leaderboard{suffix}.csv")
     points = pareto_points(
         leaderboard,
-        [search for search in ALGORITHM_LABELS if search in SEARCH_METHODS],
+        searches,
         [baseline for baseline in BASELINE_LABELS if baseline in BASELINE_METHODS],
         {
             pool: sorted(family.loc[family["pool"] == pool, "method"].unique())
             for pool in PARETO_POOLS
         },
+        positions,
     )
     points = mark_visible_families(points)
     points.to_csv(data_dir / f"inference_pareto_points{suffix}.csv", index=False)
@@ -543,6 +582,20 @@ def main() -> None:
     aggregate_parser.add_argument("--data-dir", type=Path, default=Path("data"))
     aggregate_parser.add_argument("--plots-dir", type=Path, default=Path("plots"))
     aggregate_parser.add_argument("--name", default=None, help="Suffix of the output files")
+    aggregate_parser.add_argument(
+        "--front-points",
+        type=int,
+        default=FRONT_POINTS,
+        help="Positions per search front, evenly spaced from the fastest ensemble to the best on "
+        "validation. Elo is relative to the entrants, so this changes every Elo.",
+    )
+    aggregate_parser.add_argument(
+        "--searches",
+        nargs="+",
+        choices=list(SEARCH_METHODS),
+        default=None,
+        help="Searches that enter, by default all. The others are left out of scoring and plot.",
+    )
     args = parser.parse_args()
     if args.command == "run":
         run(
@@ -561,6 +614,8 @@ def main() -> None:
             data_dir=args.data_dir,
             plots_dir=args.plots_dir,
             name=args.name,
+            front_points=args.front_points,
+            searches=args.searches,
         )
 
 
