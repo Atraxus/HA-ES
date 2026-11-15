@@ -31,6 +31,7 @@ from generate_data import (
 
 import argparse
 import multiprocessing
+import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -38,6 +39,7 @@ import numpy as np
 import pandas as pd
 
 from fast_metrics import FastRocAuc
+from precomputed_behaviors import PrecomputedBehaviors
 from plot_inference_pareto import (
     ALGORITHM_LABELS,
     BASELINE_LABELS,
@@ -94,7 +96,12 @@ def _fit_search(job: tuple[int, str]) -> list[dict[str, object]]:
     seed, algorithm = job
     d = _task_data
     ensemble = _build_ensemble(
-        _METHODS[algorithm], d["base_models"], d["metric"], seed, n_iterations=d["steps"]
+        _METHODS[algorithm],
+        d["base_models"],
+        d["metric"],
+        seed,
+        n_iterations=d["steps"],
+        behaviors=d["behaviors"],
     )
     ensemble.ensemble_fit(d["predictions_val"], d["y_val"])
     if algorithm in BASELINE_METHODS:
@@ -174,7 +181,7 @@ def family_rows(
 
 
 def evaluate_task(
-    pool, repo, methods, pruner, metrics, task, *, seeds, steps, n_jobs, warm_up
+    pool, repo, methods, pruner, metrics, task, *, seeds, steps, n_jobs, warm_up, phem_behaviors=False
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Every ensemble the searches find on one task with each of `seeds` (column ``seed``), and
     the task's family rows, which do not depend on the seed."""
@@ -192,7 +199,15 @@ def evaluate_task(
 
     if warm_up and n_jobs > 1:
         _warm_up_jit(base_models, predictions_val, y_val, metric)
+    behaviors = None
+    if not phem_behaviors:
+        # Once per task, before the workers fork, so all its searches and seeds share them
+        start = time.perf_counter()
+        behaviors = PrecomputedBehaviors(predictions_val, y_val, base_models, metric)
+        print(f"  pairwise descriptors of {len(base_models)} models in "
+              f"{time.perf_counter() - start:.1f}s", flush=True)
     _task_data.update(
+        behaviors=behaviors,
         base_models=base_models,
         predictions_val=predictions_val,
         predictions_test=predictions_test,
@@ -244,8 +259,13 @@ def run(
     steps: int,
     n_jobs: int,
     output_root: Path,
+    phem_behaviors: bool = False,
 ) -> None:
     """Find the ensembles of the selected datasets on both pools, per dataset and repeat.
+
+    The QDO searches read their behavior descriptors from pairwise values computed once per task
+    (``precomputed_behaviors``), the same values as phem's; `phem_behaviors` recomputes them per
+    ensemble as phem does, for comparison.
 
     Seeds whose results of a repeat exist are skipped, and a repeat with none left is not loaded.
     """
@@ -289,6 +309,7 @@ def run(
                     steps=steps,
                     n_jobs=n_jobs,
                     warm_up=i == 0,
+                    phem_behaviors=phem_behaviors,
                 )
                 ensembles.extend(task_ensembles)
                 families.extend(task_families)
@@ -574,6 +595,12 @@ def main() -> None:
     run_parser.add_argument("--steps", type=int, default=ENSEMBLE_STEPS)
     run_parser.add_argument("--n-jobs", type=int, default=1)
     run_parser.add_argument("--output-root", type=Path, default=RESULTS_ROOT)
+    run_parser.add_argument(
+        "--phem-behaviors",
+        action="store_true",
+        help="Recompute the QDO behavior descriptors per ensemble as phem does (slow on large "
+        "pools) instead of reading the same values from pairwise values computed once per task.",
+    )
     aggregate_parser = commands.add_parser("aggregate", help="Merge, score and plot a finished run")
     aggregate_parser.add_argument(
         "--seed", type=int, nargs="+", default=[0], help="Several seeds are averaged per task."
@@ -606,6 +633,7 @@ def main() -> None:
             steps=args.steps,
             n_jobs=args.n_jobs,
             output_root=args.output_root,
+            phem_behaviors=args.phem_behaviors,
         )
     else:
         aggregate(

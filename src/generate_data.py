@@ -32,6 +32,7 @@ import time
 import argparse
 
 from fast_metrics import FastRocAuc
+from precomputed_behaviors import PrecomputedBehaviors
 from sparse_qdo_es import SparseQDOEnsembleSelection
 from tabarena_data import (
     CLASSIFICATION_PROBLEM_TYPES,
@@ -46,6 +47,17 @@ from tabarena_data import (
     load_repo,
     load_resource_usage,
 )
+
+# pyribs limits BLAS to one thread around every ask and tell of a QDO search with threadpoolctl,
+# which rescans all loaded libraries each time (~0.3 s per call on the shared filesystem, two calls
+# per iteration). When BLAS already runs on one thread, as set above, the limit changes nothing, so
+# it is skipped.
+if all(os.environ[_var] == "1" for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")):
+    import contextlib
+
+    import ribs.optimizers._optimizer
+
+    ribs.optimizers._optimizer.threadpool_limits = lambda *args, **kwargs: contextlib.nullcontext()
 
 
 def parse_args():
@@ -597,12 +609,23 @@ def _job_result_paths(seed: int, method: str, time_weight: float | None, task: s
 _task_data: dict = {}
 
 
-def _build_ensemble(method: str, base_models, metric, random_seed: int, n_iterations: int | None = None):
+def _build_ensemble(
+    method: str,
+    base_models,
+    metric,
+    random_seed: int,
+    n_iterations: int | None = None,
+    behaviors: PrecomputedBehaviors | None = None,
+):
     """Create the ensemble method `method`. phem's own multiprocessing is disabled (n_jobs=1)
     because the ensembles of a task are already fitted in parallel.
 
     `n_iterations` replaces the experiments' budget: 100 for GES and 3 (times the pool size) for QDO.
+    `behaviors`, the task's precomputed pairwise descriptors, makes the QDO searches read phem's
+    loss correlation and Gower similarity from them instead of recomputing them per ensemble; the
+    values and so the searches are the same.
     """
+    space = (lambda behavior_space: behavior_space) if behaviors is None else behaviors.apply
     if method in ("GES", "MULTI_GES"):
         return EnsembleSelection(
             base_models=base_models,
@@ -623,12 +646,12 @@ def _build_ensemble(method: str, base_models, metric, random_seed: int, n_iterat
         return QDOEnsembleSelection(archive_type="quality", **qdo_kwargs)
     if method == "QDO":
         return QDOEnsembleSelection(
-            behavior_space=get_bs_configspace_similarity_and_loss_correlation(),
+            behavior_space=space(get_bs_configspace_similarity_and_loss_correlation()),
             **qdo_kwargs,
         )
     if method == "ENS_SIZE_QDO":
         return QDOEnsembleSelection(
-            behavior_space=get_bs_ensemble_size_and_loss_correlation(), **qdo_kwargs
+            behavior_space=space(get_bs_ensemble_size_and_loss_correlation()), **qdo_kwargs
         )
 
     # QDO with a hardware cost metric and loss correlation
@@ -642,7 +665,7 @@ def _build_ensemble(method: str, base_models, metric, random_seed: int, n_iterat
     metadata_key, get_behavior_space = cost_behavior_spaces[method]
     max_possible_ensemble_cost = sum(bm.model_metadata[metadata_key] for bm in base_models)
     behavior_kwargs = dict(
-        behavior_space=get_behavior_space(max_possible_ensemble_cost),
+        behavior_space=space(get_behavior_space(max_possible_ensemble_cost)),
         base_models_metadata_type="custom",
     )
     if method == "INFER_TIME_QDO_SPARSE_P20":
