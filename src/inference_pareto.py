@@ -44,9 +44,10 @@ from plot_inference_pareto import (
     ALGORITHM_LABELS,
     BASELINE_LABELS,
     FAMILY,
-    POOL_LABELS,
+    POOL_MODES,
     mark_visible_families,
     plot_inference_pareto,
+    pool_label,
 )
 from tabarena_data import (
     DEFAULT_FOLDS,
@@ -184,10 +185,14 @@ def evaluate_task(
     pool, repo, methods, pruner, metrics, task, *, seeds, steps, n_jobs, warm_up, phem_behaviors=False
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Every ensemble the searches find on one task with each of `seeds` (column ``seed``), and
-    the task's family rows, which do not depend on the seed."""
+    the task's family rows, which do not depend on the seed. Without `pruner` the pool holds every
+    config of the task."""
     dataset = repo.task_to_dataset(task)
     fold = repo.task_to_fold(task)
-    configs = pruned_pool_configs(pruner, metrics, dataset, fold)
+    if pruner is None:
+        configs = sorted(metrics.loc[(dataset, fold)].index)
+    else:
+        configs = pruned_pool_configs(pruner, metrics, dataset, fold)
     base_models, predictions_val, predictions_test = load_and_process_base_models(
         metrics, repo, dataset, fold, None, configs=configs
     )
@@ -245,6 +250,11 @@ def evaluate_task(
     return ensembles, families
 
 
+def results_root(pool_mode: str) -> Path:
+    """Where ``run`` writes by default: the pruned pools' results keep the original folder."""
+    return RESULTS_ROOT if pool_mode == "pruned" else Path(f"{RESULTS_ROOT}_{pool_mode}")
+
+
 def element_dir(output_root: Path, seed: int, dataset: str, folds: list[int]) -> Path:
     """Where ``run`` writes the results of one seed on one repeat of a dataset."""
     return output_root / f"seed_{seed}" / dataset / f"repeat_{folds[0] // FOLDS_PER_REPEAT}"
@@ -258,7 +268,8 @@ def run(
     seeds: list[int],
     steps: int,
     n_jobs: int,
-    output_root: Path,
+    output_root: Path | None,
+    pool_mode: str = "pruned",
     phem_behaviors: bool = False,
 ) -> None:
     """Find the ensembles of the selected datasets on both pools, per dataset and repeat.
@@ -267,8 +278,10 @@ def run(
     (``precomputed_behaviors``), the same values as phem's; `phem_behaviors` recomputes them per
     ensemble as phem does, for comparison.
 
-    Seeds whose results of a repeat exist are skipped, and a repeat with none left is not loaded.
+    The pools are pruned, or with `pool_mode` "all" hold every config. Seeds whose results of a
+    repeat exist are skipped, and a repeat with none left is not loaded.
     """
+    output_root = output_root or results_root(pool_mode)
     repos = {pool: load_pool_repo(methods) for pool, methods in PARETO_POOLS.items()}
     shared = sorted(set.intersection(*(set(classification_datasets(r)) for r in repos.values())))
     if array_index is not None:
@@ -295,7 +308,7 @@ def run(
         for pool, methods in PARETO_POOLS.items():
             repo = repos[pool]
             metrics = repo.metrics(datasets=[dataset], folds=element_folds).sort_index()
-            pruner = pool_pruner(repo)
+            pruner = pool_pruner(repo) if pool_mode == "pruned" else None
             for i, task in enumerate(initialize_tasks(repo, [dataset], element_folds)):
                 print(f"{pool}: {task}, seeds {pending}", flush=True)
                 task_ensembles, task_families = evaluate_task(
@@ -340,12 +353,12 @@ def front_positions(n_points: int = FRONT_POINTS) -> tuple[float, ...]:
     return tuple(float(position) for position in np.linspace(0.0, 1.0, n_points))
 
 
-def entrant_name(pool: str, algorithm: str, position: float) -> str:
-    return f"{POOL_LABELS[pool]} {ALGORITHM_LABELS[algorithm]} (front {position:.3f})"
+def entrant_name(pool: str, algorithm: str, position: float, pool_mode: str) -> str:
+    return f"{pool_label(pool, pool_mode)} {ALGORITHM_LABELS[algorithm]} (front {position:.3f})"
 
 
-def baseline_name(pool: str, algorithm: str) -> str:
-    return f"{POOL_LABELS[pool]} {BASELINE_LABELS[algorithm]}"
+def baseline_name(pool: str, algorithm: str, pool_mode: str) -> str:
+    return f"{pool_label(pool, pool_mode)} {BASELINE_LABELS[algorithm]}"
 
 
 def _entrant_row(chosen, method: str, pool: str, algorithm: str) -> dict[str, object]:
@@ -365,21 +378,29 @@ def _entrant_row(chosen, method: str, pool: str, algorithm: str) -> dict[str, ob
     }
 
 
-def front_entrants(ensembles: pd.DataFrame, positions: tuple[float, ...]) -> pd.DataFrame:
+def front_entrants(
+    ensembles: pd.DataFrame, positions: tuple[float, ...], pool_mode: str
+) -> pd.DataFrame:
     """TabArena's per-split rows of every (pool, search, front position) entrant."""
     rows = []
     for (pool, algorithm, _, _), group in ensembles.groupby(_GROUP_COLUMNS, sort=False):
         front = validation_front(group)
         for position in positions:
             chosen = front.iloc[int(np.floor(position * (len(front) - 1) + 0.5))]
-            rows.append(_entrant_row(chosen, entrant_name(pool, algorithm, position), pool, algorithm))
+            name = entrant_name(pool, algorithm, position, pool_mode)
+            rows.append(_entrant_row(chosen, name, pool, algorithm))
     return pd.DataFrame(rows)
 
 
-def baseline_entrants(ensembles: pd.DataFrame) -> pd.DataFrame:
+def baseline_entrants(ensembles: pd.DataFrame, pool_mode: str) -> pd.DataFrame:
     """TabArena's per-split rows of GES, QO-ES and QDO-ES, with one ensemble per task."""
     rows = [
-        _entrant_row(row, baseline_name(row["pool"], row["algorithm"]), row["pool"], row["algorithm"])
+        _entrant_row(
+            row,
+            baseline_name(row["pool"], row["algorithm"], pool_mode),
+            row["pool"],
+            row["algorithm"],
+        )
         for _, row in ensembles.iterrows()
     ]
     return pd.DataFrame(rows)
@@ -415,6 +436,7 @@ def pareto_points(
     baselines: list[str],
     families: dict,
     positions: tuple[float, ...],
+    pool_mode: str,
 ) -> pd.DataFrame:
     """The plotted points: Elo and mean time of every entrant, the reference left out.
 
@@ -422,13 +444,13 @@ def pareto_points(
     ``position`` is NaN. RandomForest's default counts as a family in its pool.
     """
     keys = [
-        (pool, algorithm, position, entrant_name(pool, algorithm, position))
+        (pool, algorithm, position, entrant_name(pool, algorithm, position, pool_mode))
         for pool in PARETO_POOLS
         for algorithm in searches
         for position in positions
     ]
     keys += [
-        (pool, algorithm, float("nan"), baseline_name(pool, algorithm))
+        (pool, algorithm, float("nan"), baseline_name(pool, algorithm, pool_mode))
         for pool in PARETO_POOLS
         for algorithm in baselines
     ]
@@ -461,7 +483,7 @@ def pareto_points(
 
 
 def seed_entrants(
-    seed: int, output_root: Path, positions: tuple[float, ...], searches: list[str]
+    seed: int, output_root: Path, positions: tuple[float, ...], searches: list[str], pool_mode: str
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """One seed's per-split entrant rows and family rows, merged over its array elements.
 
@@ -489,8 +511,8 @@ def seed_entrants(
     is_entered = ensembles["algorithm"].isin(searches)
     entrants = pd.concat(
         [
-            front_entrants(ensembles[is_search & is_entered], positions),
-            baseline_entrants(ensembles[~is_search]),
+            front_entrants(ensembles[is_search & is_entered], positions, pool_mode),
+            baseline_entrants(ensembles[~is_search], pool_mode),
             family.drop(columns="pool"),
         ],
         ignore_index=True,
@@ -524,19 +546,22 @@ def average_over_seeds(per_seed: list[pd.DataFrame]) -> pd.DataFrame:
 def aggregate(
     *,
     seeds: list[int],
-    output_root: Path,
+    output_root: Path | None,
     data_dir: Path,
     plots_dir: Path,
     name: str | None,
     front_points: int = FRONT_POINTS,
     searches: list[str] | None = None,
+    pool_mode: str = "pruned",
 ) -> pd.DataFrame:
     """Merge the per-dataset jobs of the seeds, score them once and plot.
 
     Each search enters with `front_points` positions along its fronts; fewer entrants change the
     others' Elo, so compare results only between runs with the same number. Likewise, only the
-    searches in `searches` (by default all of ``SEARCH_METHODS``) enter.
+    searches in `searches` (by default all of ``SEARCH_METHODS``) enter. The outputs of `pool_mode`
+    "all" get the suffix ``_all`` before `name`'s.
     """
+    output_root = output_root or results_root(pool_mode)
     positions = front_positions(front_points)
     searches = [
         search
@@ -544,7 +569,8 @@ def aggregate(
         if search in SEARCH_METHODS and (searches is None or search in searches)
     ]
     per_seed, families = zip(
-        *(seed_entrants(seed, output_root, positions, searches) for seed in seeds), strict=True
+        *(seed_entrants(seed, output_root, positions, searches, pool_mode) for seed in seeds),
+        strict=True,
     )
     entrants = average_over_seeds(list(per_seed))
     family = families[0]
@@ -553,7 +579,8 @@ def aggregate(
     # Several seeds get their own files, so they do not replace a single seed's.
     if name is None and len(seeds) > 1:
         name = f"{len(seeds)}_seeds"
-    suffix = f"_{name}" if name else ""
+    parts = [part for part in (None if pool_mode == "pruned" else pool_mode, name) if part]
+    suffix = "".join(f"_{part}" for part in parts)
     data_dir.mkdir(parents=True, exist_ok=True)
     leaderboard.to_csv(data_dir / f"inference_pareto_leaderboard{suffix}.csv")
     points = pareto_points(
@@ -565,11 +592,12 @@ def aggregate(
             for pool in PARETO_POOLS
         },
         positions,
+        pool_mode,
     )
     points = mark_visible_families(points)
     points.to_csv(data_dir / f"inference_pareto_points{suffix}.csv", index=False)
     plot_name = f"inference-pareto-mean-time{suffix.replace('_', '-')}.png"
-    path = plot_inference_pareto(points, plots_dir / plot_name)
+    path = plot_inference_pareto(points, plots_dir / plot_name, pool_mode)
     print(f"Merged {entrants['dataset'].nunique()} datasets, {len(seeds)} seed(s); wrote {path}")
     return points
 
@@ -594,7 +622,14 @@ def main() -> None:
     )
     run_parser.add_argument("--steps", type=int, default=ENSEMBLE_STEPS)
     run_parser.add_argument("--n-jobs", type=int, default=1)
-    run_parser.add_argument("--output-root", type=Path, default=RESULTS_ROOT)
+    pool_mode_help = (
+        "pruned: TabArena's EnsembleScorerMaxModels pruning; all: every config of the task. "
+        f"Results default to {RESULTS_ROOT} and {results_root('all')}."
+    )
+    run_parser.add_argument(
+        "--pool-mode", choices=POOL_MODES, default="pruned", help=pool_mode_help
+    )
+    run_parser.add_argument("--output-root", type=Path, default=None)
     run_parser.add_argument(
         "--phem-behaviors",
         action="store_true",
@@ -605,7 +640,10 @@ def main() -> None:
     aggregate_parser.add_argument(
         "--seed", type=int, nargs="+", default=[0], help="Several seeds are averaged per task."
     )
-    aggregate_parser.add_argument("--output-root", type=Path, default=RESULTS_ROOT)
+    aggregate_parser.add_argument(
+        "--pool-mode", choices=POOL_MODES, default="pruned", help=pool_mode_help
+    )
+    aggregate_parser.add_argument("--output-root", type=Path, default=None)
     aggregate_parser.add_argument("--data-dir", type=Path, default=Path("data"))
     aggregate_parser.add_argument("--plots-dir", type=Path, default=Path("plots"))
     aggregate_parser.add_argument("--name", default=None, help="Suffix of the output files")
@@ -633,6 +671,7 @@ def main() -> None:
             steps=args.steps,
             n_jobs=args.n_jobs,
             output_root=args.output_root,
+            pool_mode=args.pool_mode,
             phem_behaviors=args.phem_behaviors,
         )
     else:
@@ -644,6 +683,7 @@ def main() -> None:
             name=args.name,
             front_points=args.front_points,
             searches=args.searches,
+            pool_mode=args.pool_mode,
         )
 
 

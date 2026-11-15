@@ -14,10 +14,11 @@
 # and draws the plot. Replace YOUR_PARTITION (twice) with your Slurm partition, then start it
 # from the project root, not with sbatch:
 #   export TABARENA_CACHE=/path/to/tabarena/store
-#   bash inference_pareto_job.sh [--seed S [S ...]] [--folds 0 1 2] [--steps 40]
+#   bash inference_pareto_job.sh [--seed S [S ...]] [--folds 0 1 2] [--steps 40] [--pool-mode all]
 # Several seeds are averaged per task by the aggregate job. Elements skip the seeds whose results
 # exist, so resubmitting reruns only what is missing.
-# Outputs: results/inference_pareto/seed_<S>/<dataset>/repeat_<R>/, data/inference_pareto_*.csv
+# --pool-mode all uses every config of each task instead of the pruned pools.
+# Outputs: results/inference_pareto[_all]/seed_<S>/<dataset>/repeat_<R>/, data/inference_pareto_*.csv
 # and plots/inference-pareto-mean-time*.png. Needs `uv sync --group notebooks`.
 set -eo pipefail
 
@@ -47,7 +48,7 @@ if [ -z "$SLURM_ARRAY_TASK_ID" ]; then
                 done
                 if [ "$option" = --seed ]; then SEEDS=("${values[@]}"); else FOLDS=("${values[@]}"); fi
                 ;;
-            --output-root)
+            --output-root | --pool-mode)
                 RUN_ARGS+=("$1" "$2")
                 AGGREGATE_ARGS+=("$1" "$2")
                 shift 2

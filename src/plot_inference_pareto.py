@@ -12,10 +12,12 @@ from matplotlib.lines import Line2D
 POOL_COLORS = {"cross_family": "#2a78d6", "across_foundation_models": "#eb6834"}
 PARETO_FRONT_COLOR = "#8a8984"
 
-POOL_LABELS = {
-    "cross_family": "Classic tabular models [pruned]",
-    "across_foundation_models": "Across foundation models [pruned]",
+POOL_NAMES = {
+    "cross_family": "Classic tabular models",
+    "across_foundation_models": "Across foundation models",
 }
+# A pool holds the configs TabArena's EnsembleScorerMaxModels keeps, or every config.
+POOL_MODES = ("pruned", "all")
 ALGORITHM_LABELS = {
     "mo_ges": "MO-GES",
     "mo_ges_archive": "MO-GES (archive)",
@@ -65,6 +67,12 @@ _POOL_LABEL_PLACEMENT_NO_MO_GES = {
     "cross_family": (0.0, 8, -14, "left"),
     "across_foundation_models": (0.5, 6, -34, "left"),
 }
+# On the full pools the foundation models' 3-batch line ends among the classic models' points, so
+# its label sits right of the line's best point instead.
+_POOL_LABEL_PLACEMENT_NO_MO_GES_ALL = {
+    **_POOL_LABEL_PLACEMENT_NO_MO_GES,
+    "across_foundation_models": (1.0, 14, -10, "left"),
+}
 # Family labels sit above their star, except where that would cross a line or another label.
 _FAMILY_LABEL_DEFAULT = (0, 7, "center")
 _FAMILY_LABEL_PLACEMENT = {
@@ -73,6 +81,8 @@ _FAMILY_LABEL_PLACEMENT = {
     "TabICLv2": (6, -4, "left"),
     "TabSwift": (6, -12, "left"),
 }
+# On the full pools TabPFN-2.6 sits just below TabICLv2's label.
+_FAMILY_LABEL_PLACEMENT_ALL = {**_FAMILY_LABEL_PLACEMENT, "TabPFN-2.6": (6, -4, "left")}
 
 
 def pareto_front(points: pd.DataFrame) -> pd.DataFrame:
@@ -89,12 +99,23 @@ def mark_visible_families(points: pd.DataFrame, min_elo: float = VISIBLE_ELO) ->
     return points.assign(shown=~is_family | (points["elo"] > min_elo) | on_front)
 
 
-def _legend_handles(points: pd.DataFrame) -> list[Line2D]:
+def pool_label(pool: str, pool_mode: str = "pruned") -> str:
+    return f"{POOL_NAMES[pool]} [{pool_mode}]"
+
+
+def _legend_handles(points: pd.DataFrame, pool_mode: str) -> list[Line2D]:
     """Pool colors, then one neutral entry per method, so the legend stays short."""
     ink = "#52514e"
     handles = [
-        Line2D([], [], marker="o", linestyle="none", color=POOL_COLORS[pool], label=label)
-        for pool, label in POOL_LABELS.items()
+        Line2D(
+            [],
+            [],
+            marker="o",
+            linestyle="none",
+            color=POOL_COLORS[pool],
+            label=pool_label(pool, pool_mode),
+        )
+        for pool in POOL_NAMES
     ]
     handles += [
         Line2D(
@@ -143,7 +164,7 @@ def _legend_handles(points: pd.DataFrame) -> list[Line2D]:
     return handles
 
 
-def plot_inference_pareto(points: pd.DataFrame, path: Path) -> Path:
+def plot_inference_pareto(points: pd.DataFrame, path: Path, pool_mode: str = "pruned") -> Path:
     """One line per (pool, algorithm), from the fastest ensemble to the best on validation.
 
     Color is the pool and marker and line style the algorithm. The large ring marks each line's
@@ -176,7 +197,10 @@ def plot_inference_pareto(points: pd.DataFrame, path: Path) -> Path:
             zorder=4,
         )
         name = row.entrant.rsplit(" (", 1)[0]
-        dx, dy, alignment = _FAMILY_LABEL_PLACEMENT.get(name, _FAMILY_LABEL_DEFAULT)
+        family_placement = (
+            _FAMILY_LABEL_PLACEMENT_ALL if pool_mode == "all" else _FAMILY_LABEL_PLACEMENT
+        )
+        dx, dy, alignment = family_placement.get(name, _FAMILY_LABEL_DEFAULT)
         ax.annotate(
             name,
             (row.time_infer_s_per_1K, row.elo),
@@ -227,10 +251,15 @@ def plot_inference_pareto(points: pd.DataFrame, path: Path) -> Path:
                 index, dx, dy, alignment = _POOL_LABEL_PLACEMENT[pool]
                 anchor = line.iloc[index if len(line) > index else 0]
             else:
-                position, dx, dy, alignment = _POOL_LABEL_PLACEMENT_NO_MO_GES[pool]
+                placement = (
+                    _POOL_LABEL_PLACEMENT_NO_MO_GES_ALL
+                    if pool_mode == "all"
+                    else _POOL_LABEL_PLACEMENT_NO_MO_GES
+                )
+                position, dx, dy, alignment = placement[pool]
                 anchor = line.loc[(line["position"] - position).abs().idxmin()]
             ax.annotate(
-                POOL_LABELS[pool].replace("foundation models", "foundation\nmodels"),
+                pool_label(pool, pool_mode).replace("foundation models", "foundation\nmodels"),
                 (anchor[_TIME], anchor["elo"]),
                 xytext=(dx, dy),
                 textcoords="offset points",
@@ -253,7 +282,7 @@ def plot_inference_pareto(points: pd.DataFrame, path: Path) -> Path:
     ax.set_ylabel("Test Elo (RF default = 1000)")
     # Outside the axes: both pools' points end near the lower right, where a legend would cover them.
     ax.legend(
-        handles=_legend_handles(points),
+        handles=_legend_handles(points, pool_mode),
         frameon=True,
         loc="upper left",
         bbox_to_anchor=(1.01, 1.0),
