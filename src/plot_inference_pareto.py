@@ -22,7 +22,7 @@ ALGORITHM_LABELS = {
     "mo_ges": "MO-GES",
     "mo_ges_archive": "MO-GES (archive)",
     "infer_qdo": "Infer-QDO-ES",
-    "infer_qdo_3_batches": "Infer-QDO-ES (3 batches)",
+    "infer_qdo_3_iterations": "Infer-QDO-ES (3 iterations)",
     "infer_qdo_sparse": "Infer-QDO-ES (sparse, dynamic)",
     "infer_qdo_sparse_p20": "Infer-QDO-ES (sparse, static 20%)",
     "infer_qdo_sparse_p50": "Infer-QDO-ES (sparse, static 50%)",
@@ -36,7 +36,7 @@ _MARKERS = {
     "mo_ges": "o",
     "mo_ges_archive": ">",
     "infer_qdo": "P",
-    "infer_qdo_3_batches": "h",
+    "infer_qdo_3_iterations": "h",
     "infer_qdo_sparse": "X",
     "infer_qdo_sparse_p20": "s",
     "infer_qdo_sparse_p50": "<",
@@ -48,7 +48,7 @@ _LINE_STYLES = {
     "mo_ges": "-",
     "mo_ges_archive": (0, (5, 1)),
     "infer_qdo": ":",
-    "infer_qdo_3_batches": (0, (4, 1, 1, 1, 1, 1)),
+    "infer_qdo_3_iterations": (0, (4, 1, 1, 1, 1, 1)),
     "infer_qdo_sparse": "-.",
     "infer_qdo_sparse_p20": "--",
     "infer_qdo_sparse_p50": (0, (3, 1, 1, 1)),
@@ -60,18 +60,12 @@ _POOL_LABEL_PLACEMENT = {
     "cross_family": (0, 8, -14, "left"),
     "across_foundation_models": (4, -6, 26, "right"),
 }
-# Without MO-GES the labels sit below the 3-batch line, which every Infer-QDO-ES figure has, at the
-# point nearest a front position: (position, x offset, y offset, alignment), in points.
-_POOL_LABEL_ANCHOR = "infer_qdo_3_batches"
+# Without MO-GES the labels sit below the 3-iteration line, which every Infer-QDO-ES figure has, at
+# the point nearest a front position: (position, x offset, y offset, alignment), in points.
+_POOL_LABEL_ANCHOR = "infer_qdo_3_iterations"
 _POOL_LABEL_PLACEMENT_NO_MO_GES = {
     "cross_family": (0.0, 8, -14, "left"),
     "across_foundation_models": (0.5, 6, -34, "left"),
-}
-# On the full pools the foundation models' 3-batch line ends among the classic models' points, so
-# its label sits right of the line's best point instead.
-_POOL_LABEL_PLACEMENT_NO_MO_GES_ALL = {
-    **_POOL_LABEL_PLACEMENT_NO_MO_GES,
-    "across_foundation_models": (1.0, 14, -10, "left"),
 }
 # Family labels sit above their star, except where that would cross a line or another label.
 _FAMILY_LABEL_DEFAULT = (0, 7, "center")
@@ -251,12 +245,7 @@ def plot_inference_pareto(points: pd.DataFrame, path: Path, pool_mode: str = "pr
                 index, dx, dy, alignment = _POOL_LABEL_PLACEMENT[pool]
                 anchor = line.iloc[index if len(line) > index else 0]
             else:
-                placement = (
-                    _POOL_LABEL_PLACEMENT_NO_MO_GES_ALL
-                    if pool_mode == "all"
-                    else _POOL_LABEL_PLACEMENT_NO_MO_GES
-                )
-                position, dx, dy, alignment = placement[pool]
+                position, dx, dy, alignment = _POOL_LABEL_PLACEMENT_NO_MO_GES[pool]
                 anchor = line.loc[(line["position"] - position).abs().idxmin()]
             ax.annotate(
                 pool_label(pool, pool_mode).replace("foundation models", "foundation\nmodels"),

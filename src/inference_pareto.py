@@ -78,7 +78,7 @@ _SUITE = "HA-ES"
 # Each search's method id in generate_data._build_ensemble
 SEARCH_METHODS = {
     "infer_qdo": "INFER_TIME_QDO",
-    "infer_qdo_3_batches": "INFER_TIME_QDO_3_BATCHES",
+    "infer_qdo_3_iterations": "INFER_TIME_QDO_3_ITERATIONS",
     "infer_qdo_sparse_p20": "INFER_TIME_QDO_SPARSE_P20",
 }
 BASELINE_METHODS = {"ges": "GES", "qoes": "QO", "qdoes": "QDO"}

@@ -657,7 +657,7 @@ def _build_ensemble(
     # QDO with a hardware cost metric and loss correlation
     cost_behavior_spaces = {
         "INFER_TIME_QDO": ("test_predict_time", get_custom_behavior_space_with_inference_time),
-        "INFER_TIME_QDO_3_BATCHES": ("test_predict_time", get_custom_behavior_space_with_inference_time),
+        "INFER_TIME_QDO_3_ITERATIONS": ("test_predict_time", get_custom_behavior_space_with_inference_time),
         "INFER_TIME_QDO_SPARSE_P20": ("test_predict_time", get_custom_behavior_space_with_inference_time),
         "MEMORY_QDO": ("memory", get_custom_behavior_space_with_memory_usage),
         "DISK_QDO": ("diskspace", get_custom_behavior_space_with_disk_usage),
@@ -673,12 +673,10 @@ def _build_ensemble(
         return SparseQDOEnsembleSelection(
             fixed_sparse_probability=True, **behavior_kwargs, **qdo_kwargs
         )
-    ensemble = QDOEnsembleSelection(**behavior_kwargs, **qdo_kwargs)
-    if method == "INFER_TIME_QDO_3_BATCHES":
-        # The single models, then 3 batches, whatever the pool size. phem derives the number of
-        # batches from n_evaluations after it has scored the single models.
-        ensemble.n_evaluations = ensemble.n_base_models + 3 * ensemble.batch_size
-    return ensemble
+    if method == "INFER_TIME_QDO_3_ITERATIONS":
+        # HA-ES's own budget, 3 times the pool size, whatever `n_iterations` is
+        qdo_kwargs["n_iterations"] = 3
+    return QDOEnsembleSelection(**behavior_kwargs, **qdo_kwargs)
 
 
 def _run_job(job: tuple[int, str, float | None]):
