@@ -9,13 +9,19 @@ import pandas as pd
 import seaborn as sns
 from matplotlib.lines import Line2D
 
-# The CPU pool is the classic pool without GPU runs, so it keeps its color; they never share a figure.
+# The CPU pool is the classic pool without GPU runs, so it keeps its color; they never share a
+# figure.
 POOL_COLORS = {
     "cross_family": "#2a78d6",
     "across_foundation_models": "#eb6834",
     "cross_family_cpu": "#2a78d6",
 }
 PARETO_FRONT_COLOR = "#8a8984"
+# A figure of several pool modes colors its series by pool mode instead: the next free categorical
+# slots after the pools' blue and orange, so orange keeps meaning the foundation models.
+MODE_COLORS = {"pruned": "#2a78d6", "all": "#1baf7a"}
+# Its families' stars, which do not depend on the pool mode
+NEUTRAL_FAMILY_COLOR = "#d3d1c9"
 
 POOL_NAMES = {
     "cross_family": "Classic tabular models",
@@ -79,6 +85,12 @@ _POOL_LABEL_PLACEMENT_NO_MO_GES = {
     # Below TabM's star, clear of the classic families' stars
     "cross_family_cpu": (0.5, 10, -95, "left"),
 }
+# Pool labels of a figure of several pool modes, per (pool, pool mode): the pruned pool's sits
+# above left of its lines, apart from the full pool's lines below it.
+_POOL_LABEL_PLACEMENT_MODES = {
+    ("cross_family_cpu", "pruned"): (0.5, -25, 50, "right"),
+    ("cross_family_cpu", "all"): (0.5, 10, -95, "left"),
+}
 # Family labels sit above their star, except where that would cross a line or another label.
 _FAMILY_LABEL_DEFAULT = (0, 7, "center")
 _FAMILY_LABEL_PLACEMENT = {
@@ -88,6 +100,7 @@ _FAMILY_LABEL_PLACEMENT = {
     "TabSwift": (6, -12, "left"),
     "XGBoost": (6, -4, "left"),
     "TorchMLP": (6, -4, "left"),
+    "ExtraTrees": (-6, -4, "right"),
 }
 # On the full pools TabPFN-2.6 sits just below TabICLv2's label.
 _FAMILY_LABEL_PLACEMENT_ALL = {**_FAMILY_LABEL_PLACEMENT, "TabPFN-2.6": (6, -4, "left")}
@@ -113,21 +126,38 @@ def pool_label(pool: str, pool_mode: str = "pruned") -> str:
     return f"{POOL_NAMES[pool]} [{pool_mode}]"
 
 
+def _by_mode(points: pd.DataFrame) -> bool:
+    """Whether `points` hold several pool modes, so that color is the pool mode."""
+    return "pool_mode" in points and points["pool_mode"].nunique() > 1
+
+
+def _series(points: pd.DataFrame, pool_mode: str) -> list[tuple[str, str]]:
+    """The (pool, pool mode) of each colored series, in the legend's order."""
+    if not _by_mode(points):
+        pools = set(points["pool"])
+        return [(pool, pool_mode) for pool in POOL_NAMES if pool in pools]
+    present = set(zip(points["pool"], points["pool_mode"], strict=True))
+    return [(pool, mode) for pool in POOL_NAMES for mode in POOL_MODES if (pool, mode) in present]
+
+
+def _color(pool: str, mode: str, by_mode: bool) -> str:
+    return MODE_COLORS[mode] if by_mode else POOL_COLORS[pool]
+
+
 def _legend_handles(points: pd.DataFrame, pool_mode: str) -> list[Line2D]:
-    """Pool colors, then one neutral entry per method, so the legend stays short."""
+    """Pool (or pool mode) colors, then one neutral entry per method, so the legend stays short."""
     ink = "#52514e"
-    pools = set(points["pool"])
+    by_mode = _by_mode(points)
     handles = [
         Line2D(
             [],
             [],
             marker="o",
             linestyle="none",
-            color=POOL_COLORS[pool],
-            label=pool_label(pool, pool_mode),
+            color=_color(pool, mode, by_mode),
+            label=pool_label(pool, mode),
         )
-        for pool in POOL_NAMES
-        if pool in pools
+        for pool, mode in _series(points, pool_mode)
     ]
     handles += [
         Line2D(
@@ -182,6 +212,10 @@ def plot_inference_pareto(points: pd.DataFrame, path: Path, pool_mode: str = "pr
     Color is the pool and marker and line style the algorithm. The large ring marks each line's
     best-validation ensemble, and the gray staircase is the Pareto front over all points.
     Baselines (no ``position``) have one ensemble per task and are single points.
+
+    Points of several pool modes (column ``pool_mode``) get one line per (pool, pool mode,
+    algorithm), colored by pool mode, and the families' stars, which hold for every pool mode,
+    are neutral.
     """
     with sns.axes_style("whitegrid"):
         fig, ax = plt.subplots(figsize=(11.5, 6))
@@ -196,6 +230,9 @@ def plot_inference_pareto(points: pd.DataFrame, path: Path, pool_mode: str = "pr
     )
     if "shown" in points:
         points = points[points["shown"]]
+    by_mode = _by_mode(points)
+    if not by_mode:
+        points = points.assign(pool_mode=pool_mode)
     families = points[points["algorithm"] == FAMILY]
     for row in families.itertuples(index=False):
         ax.scatter(
@@ -203,7 +240,7 @@ def plot_inference_pareto(points: pd.DataFrame, path: Path, pool_mode: str = "pr
             row.elo,
             s=55,
             marker=_FAMILY_MARKER,
-            color=POOL_COLORS[row.pool],
+            color=NEUTRAL_FAMILY_COLOR if by_mode else POOL_COLORS[row.pool],
             edgecolors="#0b0b0b",
             linewidths=0.6,
             zorder=4,
@@ -230,7 +267,7 @@ def plot_inference_pareto(points: pd.DataFrame, path: Path, pool_mode: str = "pr
             row.elo,
             s=75,
             marker=_MARKERS[row.algorithm],
-            color=POOL_COLORS[row.pool],
+            color=_color(row.pool, row.pool_mode, by_mode),
             edgecolors="#0b0b0b",
             linewidths=0.8,
             zorder=4,
@@ -243,9 +280,11 @@ def plot_inference_pareto(points: pd.DataFrame, path: Path, pool_mode: str = "pr
         if not with_mo_ges and (lines["algorithm"] == _POOL_LABEL_ANCHOR).any()
         else first_algorithm
     )
-    for (pool, algorithm), line in lines.groupby(["pool", "algorithm"], sort=False):
+    for (pool, mode, algorithm), line in lines.groupby(
+        ["pool", "pool_mode", "algorithm"], sort=False
+    ):
         line = line.sort_values("position")
-        color = POOL_COLORS[pool]
+        color = _color(pool, mode, by_mode)
         ax.plot(
             line[_TIME],
             line["elo"],
@@ -263,10 +302,14 @@ def plot_inference_pareto(points: pd.DataFrame, path: Path, pool_mode: str = "pr
                 index, dx, dy, alignment = _POOL_LABEL_PLACEMENT[pool]
                 anchor = line.iloc[index if len(line) > index else 0]
             else:
-                position, dx, dy, alignment = _POOL_LABEL_PLACEMENT_NO_MO_GES[pool]
+                position, dx, dy, alignment = (
+                    _POOL_LABEL_PLACEMENT_MODES[(pool, mode)]
+                    if by_mode
+                    else _POOL_LABEL_PLACEMENT_NO_MO_GES[pool]
+                )
                 anchor = line.loc[(line["position"] - position).abs().idxmin()]
             ax.annotate(
-                pool_label(pool, pool_mode)
+                pool_label(pool, mode)
                 .replace("foundation models", "foundation\nmodels")
                 .replace(", CPU only", ",\nCPU only"),
                 (anchor[_TIME], anchor["elo"]),

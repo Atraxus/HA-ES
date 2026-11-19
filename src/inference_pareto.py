@@ -560,6 +560,24 @@ def average_over_seeds(per_seed: list[pd.DataFrame]) -> pd.DataFrame:
     return merged.groupby(_ENTRANT_KEYS, sort=False, as_index=False).agg(how)
 
 
+def merge_pool_modes(per_mode: list[pd.DataFrame]) -> pd.DataFrame:
+    """One seed's entrant rows of several pool modes.
+
+    The searches' entrants are named by pool mode. A family's row is its best config among all its
+    configs, whatever the pool mode, so it is kept once, after checking that the modes agree.
+    """
+    merged = pd.concat(per_mode, ignore_index=True)
+    duplicated = merged[merged.duplicated(_ENTRANT_KEYS, keep=False)]
+    if not duplicated["ta_name"].str.startswith("Pareto-family-").all():
+        raise ValueError(f"Entrants in several pool modes: {sorted(set(duplicated['method']))[:5]}")
+    differing = duplicated.groupby(_ENTRANT_KEYS)[_AVERAGED_COLUMNS].nunique().gt(1).any(axis=1)
+    if differing.any():
+        raise ValueError(
+            f"Family rows differ between pool modes: {list(differing.index[differing])[:5]}"
+        )
+    return merged.drop_duplicates(_ENTRANT_KEYS, ignore_index=True)
+
+
 def aggregate(
     *,
     seeds: list[int],
@@ -569,7 +587,7 @@ def aggregate(
     name: str | None,
     front_points: int = FRONT_POINTS,
     searches: list[str] | None = None,
-    pool_mode: str = "pruned",
+    pool_modes: list[str] | tuple[str, ...] = ("pruned",),
     pool_set: str = "default",
 ) -> pd.DataFrame:
     """Merge the per-dataset jobs of the seeds, score them once and plot.
@@ -577,9 +595,15 @@ def aggregate(
     Each search enters with `front_points` positions along its fronts; fewer entrants change the
     others' Elo, so compare results only between runs with the same number. Likewise, only the
     searches in `searches` (by default all of ``SEARCH_METHODS``) enter. The outputs of `pool_set`
-    "cpu" and of `pool_mode` "all" get the suffixes ``_cpu`` and ``_all`` before `name`'s.
+    "cpu" and of pool mode "all" get the suffixes ``_cpu`` and ``_all`` before `name`'s.
+
+    Several `pool_modes` are scored in one ``compare`` run, so their Elos are comparable, and drawn
+    in one figure, colored by pool mode. Their outputs get e.g. the suffix ``_pruned_vs_all`` and
+    their points a column ``pool_mode``, empty for the families, whose rows do not depend on it.
     """
-    output_root = output_root or results_root(pool_mode, pool_set)
+    modes = list(dict.fromkeys(pool_modes))
+    if output_root is not None and len(modes) > 1:
+        raise ValueError("--output-root holds one pool mode's results; omit it for several modes")
     pools = list(PARETO_POOL_SETS[pool_set])
     positions = front_positions(front_points)
     searches = [
@@ -587,37 +611,59 @@ def aggregate(
         for search in ALGORITHM_LABELS
         if search in SEARCH_METHODS and (searches is None or search in searches)
     ]
-    per_seed, families = zip(
-        *(seed_entrants(seed, output_root, positions, searches, pool_mode) for seed in seeds),
-        strict=True,
-    )
-    entrants = average_over_seeds(list(per_seed))
+    per_seed, families = [], []
+    for seed in seeds:
+        per_mode = [
+            seed_entrants(
+                seed,
+                output_root or results_root(mode, pool_set),
+                positions,
+                searches,
+                mode,
+            )
+            for mode in modes
+        ]
+        per_seed.append(merge_pool_modes([entrants for entrants, _ in per_mode]))
+        families.append(per_mode[0][1])
+    entrants = average_over_seeds(per_seed)
     family = families[0]
 
     leaderboard = tabarena_leaderboard(entrants)
     # Several seeds get their own files, so they do not replace a single seed's.
     if name is None and len(seeds) > 1:
         name = f"{len(seeds)}_seeds"
-    parts = [*_variant_parts(pool_mode, pool_set), *([name] if name else [])]
+    mode_name = "_vs_".join(modes)
+    parts = [*_variant_parts(mode_name, pool_set), *([name] if name else [])]
     suffix = "".join(f"_{part}" for part in parts)
     data_dir.mkdir(parents=True, exist_ok=True)
     leaderboard.to_csv(data_dir / f"inference_pareto_leaderboard{suffix}.csv")
-    points = pareto_points(
-        leaderboard,
-        pools,
-        searches,
-        [baseline for baseline in BASELINE_LABELS if baseline in BASELINE_METHODS],
-        {
-            pool: sorted(family.loc[family["pool"] == pool, "method"].unique())
-            for pool in pools
-        },
-        positions,
-        pool_mode,
+    baselines = [baseline for baseline in BASELINE_LABELS if baseline in BASELINE_METHODS]
+    family_names = {
+        pool: sorted(family.loc[family["pool"] == pool, "method"].unique()) for pool in pools
+    }
+    points = pd.concat(
+        [
+            pareto_points(
+                leaderboard,
+                pools,
+                searches,
+                baselines,
+                family_names if i == 0 else {},
+                positions,
+                mode,
+            ).assign(pool_mode=mode)
+            for i, mode in enumerate(modes)
+        ],
+        ignore_index=True,
     )
+    if len(modes) == 1:
+        points = points.drop(columns="pool_mode")
+    else:
+        points.loc[points["algorithm"] == FAMILY, "pool_mode"] = None
     points = mark_visible_families(points, VISIBLE_ELO[pool_set])
     points.to_csv(data_dir / f"inference_pareto_points{suffix}.csv", index=False)
     plot_name = f"inference-pareto-mean-time{suffix.replace('_', '-')}.png"
-    path = plot_inference_pareto(points, plots_dir / plot_name, pool_mode)
+    path = plot_inference_pareto(points, plots_dir / plot_name, mode_name)
     print(f"Merged {entrants['dataset'].nunique()} datasets, {len(seeds)} seed(s); wrote {path}")
     return points
 
@@ -669,7 +715,11 @@ def main() -> None:
         "--seed", type=int, nargs="+", default=[0], help="Several seeds are averaged per task."
     )
     aggregate_parser.add_argument(
-        "--pool-mode", choices=POOL_MODES, default="pruned", help=pool_mode_help
+        "--pool-mode",
+        nargs="+",
+        choices=POOL_MODES,
+        default=["pruned"],
+        help=f"{pool_mode_help} Several pool modes are scored in one run and drawn in one figure.",
     )
     aggregate_parser.add_argument(
         "--pools", choices=list(PARETO_POOL_SETS), default="default", help=pool_set_help
@@ -715,7 +765,7 @@ def main() -> None:
             name=args.name,
             front_points=args.front_points,
             searches=args.searches,
-            pool_mode=args.pool_mode,
+            pool_modes=args.pool_mode,
             pool_set=args.pools,
         )
 
