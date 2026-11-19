@@ -9,12 +9,18 @@ import pandas as pd
 import seaborn as sns
 from matplotlib.lines import Line2D
 
-POOL_COLORS = {"cross_family": "#2a78d6", "across_foundation_models": "#eb6834"}
+# The CPU pool is the classic pool without GPU runs, so it keeps its color; they never share a figure.
+POOL_COLORS = {
+    "cross_family": "#2a78d6",
+    "across_foundation_models": "#eb6834",
+    "cross_family_cpu": "#2a78d6",
+}
 PARETO_FRONT_COLOR = "#8a8984"
 
 POOL_NAMES = {
     "cross_family": "Classic tabular models",
     "across_foundation_models": "Across foundation models",
+    "cross_family_cpu": "Classic tabular models, CPU only",
 }
 # A pool holds the configs TabArena's EnsembleScorerMaxModels keeps, or every config.
 POOL_MODES = ("pruned", "all")
@@ -29,7 +35,10 @@ ALGORITHM_LABELS = {
 }
 # One family's single model, drawn and labelled point by point.
 FAMILY = "family"
-VISIBLE_ELO = 1400.0
+# A family is drawn above this Elo or on the Pareto front, per pool set. Beside the foundation
+# models, most classic families cluster below 1400; the CPU figure has only the 9 classic
+# families, so it draws them all.
+VISIBLE_ELO = {"default": 1400.0, "cpu": float("-inf")}
 # Searches with one ensemble per task, drawn as single points.
 BASELINE_LABELS = {"ges": "GES", "qoes": "QO-ES", "qdoes": "QDO-ES"}
 _MARKERS = {
@@ -59,6 +68,7 @@ _TIME = "time_infer_s_per_1K"
 _POOL_LABEL_PLACEMENT = {
     "cross_family": (0, 8, -14, "left"),
     "across_foundation_models": (4, -6, 26, "right"),
+    "cross_family_cpu": (0, 8, -14, "left"),
 }
 # Without MO-GES the labels sit below the 3-iteration line, which every Infer-QDO-ES figure has, at
 # the point nearest a front position: (position, x offset, y offset, alignment), in points.
@@ -66,6 +76,8 @@ _POOL_LABEL_ANCHOR = "infer_qdo_3_iterations"
 _POOL_LABEL_PLACEMENT_NO_MO_GES = {
     "cross_family": (0.0, 8, -14, "left"),
     "across_foundation_models": (0.5, 6, -34, "left"),
+    # Below TabM's star, clear of the classic families' stars
+    "cross_family_cpu": (0.5, 10, -95, "left"),
 }
 # Family labels sit above their star, except where that would cross a line or another label.
 _FAMILY_LABEL_DEFAULT = (0, 7, "center")
@@ -74,6 +86,8 @@ _FAMILY_LABEL_PLACEMENT = {
     "CatBoost": (-6, 5, "right"),
     "TabICLv2": (6, -4, "left"),
     "TabSwift": (6, -12, "left"),
+    "XGBoost": (6, -4, "left"),
+    "TorchMLP": (6, -4, "left"),
 }
 # On the full pools TabPFN-2.6 sits just below TabICLv2's label.
 _FAMILY_LABEL_PLACEMENT_ALL = {**_FAMILY_LABEL_PLACEMENT, "TabPFN-2.6": (6, -4, "left")}
@@ -86,7 +100,9 @@ def pareto_front(points: pd.DataFrame) -> pd.DataFrame:
     return ordered[ordered["elo"] > previous_best]
 
 
-def mark_visible_families(points: pd.DataFrame, min_elo: float = VISIBLE_ELO) -> pd.DataFrame:
+def mark_visible_families(
+    points: pd.DataFrame, min_elo: float = VISIBLE_ELO["default"]
+) -> pd.DataFrame:
     """Add ``shown``: a family's model is drawn above ``min_elo`` or on the Pareto front."""
     is_family = points["algorithm"] == FAMILY
     on_front = points.index.isin(pareto_front(points).index)
@@ -100,6 +116,7 @@ def pool_label(pool: str, pool_mode: str = "pruned") -> str:
 def _legend_handles(points: pd.DataFrame, pool_mode: str) -> list[Line2D]:
     """Pool colors, then one neutral entry per method, so the legend stays short."""
     ink = "#52514e"
+    pools = set(points["pool"])
     handles = [
         Line2D(
             [],
@@ -110,6 +127,7 @@ def _legend_handles(points: pd.DataFrame, pool_mode: str) -> list[Line2D]:
             label=pool_label(pool, pool_mode),
         )
         for pool in POOL_NAMES
+        if pool in pools
     ]
     handles += [
         Line2D(
@@ -248,7 +266,9 @@ def plot_inference_pareto(points: pd.DataFrame, path: Path, pool_mode: str = "pr
                 position, dx, dy, alignment = _POOL_LABEL_PLACEMENT_NO_MO_GES[pool]
                 anchor = line.loc[(line["position"] - position).abs().idxmin()]
             ax.annotate(
-                pool_label(pool, pool_mode).replace("foundation models", "foundation\nmodels"),
+                pool_label(pool, pool_mode)
+                .replace("foundation models", "foundation\nmodels")
+                .replace(", CPU only", ",\nCPU only"),
                 (anchor[_TIME], anchor["elo"]),
                 xytext=(dx, dy),
                 textcoords="offset points",

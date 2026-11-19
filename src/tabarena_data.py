@@ -7,6 +7,8 @@ import warnings
 
 import pandas as pd
 from tabarena.contexts.tabarena.context import TabArenaContext
+from tabarena.models.realmlp.info import realmlp_cpu_method_metadata
+from tabarena.models.tabm.info import tabm_method_metadata as tabm_cpu_method_metadata
 from tabarena.repository import EvaluationRepositoryCollection
 from tabarena.simulation.ensemble_selection_config_scorer import EnsembleScorerMaxModels
 
@@ -54,6 +56,35 @@ PARETO_POOLS = {
     ],
 }
 
+# TabArena's CPU runs of methods whose artifacts in PARETO_POOLS are GPU runs (suite
+# tabarena-2025-06-12). The pinned TabArena defines them but does not register them, so they are
+# looked up here by these names. TabM_CPU is TabArena's earlier TabM implementation: the current
+# one (PARETO_POOLS' "TabM") was only run on GPU. No foundation model has a CPU run.
+CPU_VARIANTS = {
+    "RealMLP_CPU": realmlp_cpu_method_metadata,
+    "TabM_CPU": tabm_cpu_method_metadata,
+}
+
+# The CPU-only comparison: the methods of PARETO_POOLS that run without a GPU, each GPU method
+# replaced by its CPU run where TabArena has one. Every foundation model needs a GPU, so only the
+# classic pool remains.
+CPU_PARETO_POOLS = {
+    "cross_family_cpu": [
+        "CatBoost",
+        "ExtraTrees",
+        "LightGBM",
+        "NeuralNetFastAI",
+        "NeuralNetTorch",
+        "RandomForest",
+        "RealMLP_CPU",
+        "TabM_CPU",
+        "XGBoost",
+    ],
+}
+
+# The pool sets of the Pareto comparison (`inference_pareto.py --pools`).
+PARETO_POOL_SETS = {"default": PARETO_POOLS, "cpu": CPU_PARETO_POOLS}
+
 # The pinned TabArena registers these methods under tabarena-2026-09-16. The Pareto comparison uses
 # the artifacts of the suites below; left as registered, load_repo would download other ones.
 PARETO_METHOD_SUITES = {
@@ -89,7 +120,10 @@ def load_repo(methods: list[str] | None = None) -> EvaluationRepositoryCollectio
 
 
 def pareto_method_metadata(context: TabArenaContext, method: str):
-    """TabArena's metadata of `method`, moved to the suite the Pareto comparison uses."""
+    """TabArena's metadata of `method`, moved to the suite the Pareto comparison uses, or of
+    one of the ``CPU_VARIANTS``."""
+    if method in CPU_VARIANTS:
+        return CPU_VARIANTS[method]
     metadata = context.method_metadata(method=method)
     suite = PARETO_METHOD_SUITES.get(method)
     return metadata if suite is None else dataclasses.replace(metadata, suite=suite)
